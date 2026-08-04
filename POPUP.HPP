@@ -1,0 +1,49 @@
+/*===========================================================================
+ * POPUP.HPP  -  Popup window class definition (bordered box with save/restore)
+ * Target: MSVC 1.52c / Open Watcom 1.9  DOS
+ *===========================================================================*/
+// class definition file for Popup
+
+#ifndef POPUP_HPP
+#define POPUP_HPP
+
+#include "dosforms.hpp"
+#include "structs.hpp"
+
+class Popup : public DOSForms
+{
+public:
+    Popup( void );
+    Popup( const char* title );
+    Popup( const coordinates_t* coordinates );
+    Popup( const coordinates_t* coordinates, const char* title );
+    Popup( const foreground_color_t foreground, const background_color_t background );
+    Popup( const foreground_color_t foreground, const background_color_t background, const char* title );
+    Popup( const foreground_color_t foreground, const background_color_t background, const coordinates_t* coordinates );
+    Popup( const foreground_color_t foreground, const background_color_t background, const coordinates_t* coordinates, const char* title );
+    ~Popup( void );
+
+private:
+    Popup( const Popup & );
+    Popup &operator=( const Popup & );
+
+public:
+    coordinates_t coordinates;
+    border_style_t border_style;
+    char title[35];
+    text_justify_t text_justification;
+    boolean drop_shadow;
+
+    // methods
+    virtual void Draw( void );
+    void SetCoordinates( const unsigned short row, const unsigned short column, const unsigned short end_row, const unsigned short end_column );
+    boolean RestoreWindow( void );
+
+protected:
+    unsigned short* screen_buffer;
+    boolean SaveWindow( void );
+};
+
+#endif
+
+
