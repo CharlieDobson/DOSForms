@@ -21,6 +21,11 @@ class App : public Desktop
     short child_count;
     boolean running;                    // Run() loop control
     int last_buttons;                   // previous mouse button state (edge detect)
+    // Bare-Alt tracking (see PollEvent).  alt_down is the last state of the
+    // BIOS Alt flag; alt_clean says no other key has been read since it went
+    // down, which is what separates "Alt" from "Alt+F".
+    boolean alt_down;
+    boolean alt_clean;
 
     App( const App & );
     App &operator=( const App & );
@@ -30,6 +35,7 @@ class App : public Desktop
 public:
     App( void );
     App( const foreground_color_t foreground, const background_color_t background );
+    virtual ~App( void );                 // deregisters the modal resync hook
 
     // methods
     boolean Add( DOSForms *child );       // register a child; draw order == add order (z-order)
@@ -38,6 +44,11 @@ public:
     virtual boolean HandleEvent( const Event &e );  // offer the event to children, topmost first
     void Run( void );                     // event loop: poll input + dispatch until Quit()/Esc
     void Quit( void );                    // stop the Run() loop
+    // Re-read the mouse buttons into the edge detector.  Call this after a
+    // MODAL dialog that ran its own mouse loop: the press/release edges that
+    // happened inside it never reached PollEvent, so without a resync the next
+    // poll can synthesize a phantom click from the leftover state.
+    void SyncMouseButtons( void );
 };
 
 #endif

@@ -45,6 +45,13 @@ private:
     short  column_count;
     short  bar_row;         // 0 (top) or 1 (under a TitleBar)
     short  active;          // open column index, or -1
+    // The bar itself has the keyboard but no dropdown is open yet: the state
+    // a bare Alt puts the menu into, where Left/Right walk the columns and
+    // Enter or Down drops the list.  -1 when the bar is not focused.  It is
+    // separate from 'active' rather than a mode of it because an open
+    // dropdown and a merely highlighted column look and behave differently,
+    // and Open()/Close() would otherwise have to keep a second meaning.
+    short  bar_focus;
     short  highlight;       // highlighted item index while a dropdown is open
     Popup  dropdown;        // frame + screen save/restore for the open list
 
@@ -54,6 +61,8 @@ private:
     void Open( short which );
     void Close( void );
     void DrawItems( void );
+    void FocusBar( short which );   // highlight a bar column, no dropdown
+    void LeaveBar( void );          // give the keyboard back
 
 public:
     Menu( void );
@@ -61,7 +70,23 @@ public:
 
     short AddMenu( const char *label, char hotkey );   // returns the column index, or -1
     boolean AddItem( short menu, const char *label, char hotkey, MenuAction action, void *user );
+    // Rewrite an item's label after the fact, for a caller that marks the
+    // setting currently in force ("* Folder View" / "  Flat View").  The
+    // dropdown sizes itself from the labels every time it opens, so a longer
+    // label needs nothing else done to it.  Returns FALSE for a bad index.
+    boolean SetItemLabel( short menu, short item, const char *label );
+    short ItemCount( short menu ) const;
     void SetRow( short row );    // 0 normally; 1 when a TitleBar occupies the top row
+
+    // Put the keyboard on the menu bar without opening anything - what a bare
+    // Alt does.  Left/Right then walk the columns, Enter or Down opens one,
+    // and Esc gives the keyboard back.  Harmless when a dropdown is already
+    // open (it closes it and highlights that column instead).
+    void ActivateBar( void );
+    // 'boolean' is an enum here, so the comparison has to be cast rather than
+    // returned as the int it naturally is.
+    boolean IsActive( void ) const
+        { return ( active >= 0 || bar_focus >= 0 ) ? TRUE : FALSE; }
 
     virtual void SetMouse( MSMouse *m );          // also hands the mouse to the dropdown frame
     virtual void Draw( void );                    // draw the bar (the dropdown opens on demand)

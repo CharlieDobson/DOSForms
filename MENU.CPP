@@ -4,7 +4,7 @@
  *===========================================================================*/
 // Menu class implementation file
 
-#include <graph.h>              // MSVC/Watcom text output
+#include "screen.hpp"           // DfTextOut - the renderer, text or graphics
 #include <string.h>             // strncpy, strlen
 #include <ctype.h>              // toupper
 #include "menu.hpp"
@@ -16,6 +16,7 @@ Menu::Menu( void ) : DOSForms( FG_BLACK, BG_WHITE )
     column_count = 0;
     bar_row = 0;
     active = -1;
+    bar_focus = -1;
     highlight = 0;
 }
 
@@ -25,6 +26,7 @@ Menu::Menu( const foreground_color_t foreground, const background_color_t backgr
     column_count = 0;
     bar_row = 0;
     active = -1;
+    bar_focus = -1;
     highlight = 0;
 }
 
@@ -62,6 +64,24 @@ boolean Menu::AddItem( short menu, const char *label, char hotkey, MenuAction ac
     return TRUE;
 }
 
+boolean Menu::SetItemLabel( short menu, short item, const char *label )
+{
+    if ( menu < 0 || menu >= column_count || !label ) return FALSE;
+
+    Column *c = &columns[menu];
+    if ( item < 0 || item >= c->item_count ) return FALSE;
+
+    strncpy( c->items[item].label, label, LABEL_LEN - 1 );
+    c->items[item].label[LABEL_LEN - 1] = '\0';
+    return TRUE;
+}
+
+short Menu::ItemCount( short menu ) const
+{
+    if ( menu < 0 || menu >= column_count ) return 0;
+    return columns[menu].item_count;
+}
+
 void Menu::SetRow( short row )
 {
     bar_row = row;
@@ -81,12 +101,48 @@ void Menu::Draw( void )
 
     ClearRow( bar_row + 1 );     // clear the bar row to the menu colors (1-based)
 
-    _settextcolor( fg_color );
-    _setbkcolor( bg_color );
+    // The column with the keyboard is drawn in reverse video, whether it has
+    // a dropdown open under it or is only focused: without that, a bare Alt
+    // would put the keyboard somewhere the user cannot see.
+    short lit = ( active >= 0 ) ? active : bar_focus;
+
     for ( short i = 0; i < column_count; ++i ) {
-        _settextposition( bar_row + 1, columns[i].x + 1 );   // 0-based -> 1-based
-        _outtext( columns[i].label );
+        // the lit column is the colour pair swapped: reverse video
+        foreground_color_t f = ( i == lit ) ? (foreground_color_t)bg_color : fg_color;
+        background_color_t b = ( i == lit ) ? (background_color_t)fg_color : bg_color;
+        DfTextOut( (short)( bar_row + 1 ), (short)( columns[i].x + 1 ),   // 0-based -> 1-based
+                   columns[i].label, f, b );
     }
+}
+
+// Highlight a bar column with no dropdown under it.  Redraws the bar rather
+// than just the two columns that changed: the bar is one row, and one _outtext
+// per column is cheaper than working out which two moved.
+void Menu::FocusBar( short which )
+{
+    if ( column_count <= 0 ) return;
+    if ( which < 0 ) which = (short)( column_count - 1 );
+    if ( which >= column_count ) which = 0;
+    if ( active >= 0 ) Close();
+    bar_focus = which;
+    Draw();
+}
+
+void Menu::LeaveBar( void )
+{
+    if ( bar_focus < 0 ) return;
+    bar_focus = -1;
+    Draw();
+}
+
+void Menu::ActivateBar( void )
+{
+    // A second bare Alt while the bar already has the keyboard puts it back,
+    // which is what every other menu bar does and what makes Alt safe to
+    // press by accident.
+    if ( active >= 0 )    { Close(); Draw(); return; }
+    if ( bar_focus >= 0 ) { LeaveBar(); return; }
+    FocusBar( 0 );
 }
 
 void Menu::DrawItems( void )
@@ -109,15 +165,11 @@ void Menu::DrawItems( void )
         line[interior] = '\0';
         for ( j = 0; lbl[j] != '\0' && j + 1 < interior; ++j ) line[j + 1] = lbl[j];
 
-        if ( i == highlight ) {                  // selected row: swap fg/bg
-            _settextcolor( (short)bg_color );
-            _setbkcolor( (long)fg_color );
-        } else {
-            _settextcolor( fg_color );
-            _setbkcolor( bg_color );
-        }
-        _settextposition( top + 2 + i, column + 2 );   // inside the border, 1-based
-        _outtext( line );
+        // selected row: swap fg/bg
+        foreground_color_t f = ( i == highlight ) ? (foreground_color_t)bg_color : fg_color;
+        background_color_t b = ( i == highlight ) ? (background_color_t)fg_color : bg_color;
+        DfTextOut( (short)( top + 2 + i ), (short)( column + 2 ),   // inside the border, 1-based
+                   line, f, b );
     }
 }
 
@@ -127,6 +179,7 @@ void Menu::Open( short which )
     if ( active >= 0 ) Close();
 
     active = which;
+    bar_focus = -1;         // 'active' is now what the bar highlights
     highlight = 0;
     Column *c = &columns[which];
 
@@ -157,6 +210,10 @@ void Menu::Close( void )
     if ( active < 0 ) return;
     dropdown.RestoreWindow();   // put back whatever was under the dropdown
     active = -1;
+    // The bar row is above the dropdown, so RestoreWindow never touches it:
+    // the highlight on the column that was open has to be painted out by
+    // hand, or it stays lit under a menu that is no longer there.
+    Draw();
 }
 
 // Map App::Run's extended encoding (0x100 | scancode) for an Alt+letter
@@ -180,8 +237,54 @@ static char AltKeyToChar( int key )
 boolean Menu::HandleEvent( const Event &e )
 {
     if ( e.kind == Event::EV_KEY ) {
+        // A bare Alt reaches the bar from anywhere - it is the one keystroke
+        // whose whole purpose is to take the keyboard off whatever has it.
+        if ( e.key == KEY_ALT ) { ActivateBar(); return TRUE; }
+
+        // The bar has the keyboard but nothing is dropped yet.  Checked before
+        // the open-dropdown arm below because the two states are exclusive and
+        // this one is the shorter answer.
+        if ( bar_focus >= 0 && active < 0 ) {
+            if ( e.key == KEY_ESC ) { LeaveBar(); return TRUE; }
+            if ( e.key == KEY_LEFT ) {
+                FocusBar( (short)( bar_focus - 1 ) );
+                return TRUE;
+            }
+            if ( e.key == KEY_RIGHT ) {
+                FocusBar( (short)( bar_focus + 1 ) );
+                return TRUE;
+            }
+            if ( e.key == KEY_ENTER || e.key == KEY_DOWN ) {
+                Open( bar_focus );
+                return TRUE;
+            }
+            // A letter picks the column with that hotkey and opens it, the
+            // same letters Alt+letter uses - once the bar has the keyboard the
+            // Alt is no longer needed to say where a letter is aimed.
+            if ( e.key > 0 && e.key < 256 ) {
+                for ( short i = 0; i < column_count; ++i ) {
+                    if ( columns[i].hotkey != '\0'
+                         && toupper( e.key ) == toupper( columns[i].hotkey ) ) {
+                        Open( i );
+                        return TRUE;
+                    }
+                }
+            }
+            // Anything else gives the bar up and is passed on, so a user who
+            // pressed Alt by mistake is not trapped in a menu.
+            LeaveBar();
+            return FALSE;
+        }
+
         if ( active >= 0 ) {
-            if ( e.key == KEY_ESC ) { Close(); return TRUE; }
+            // Esc backs out one step: the dropdown closes and the bar keeps
+            // the keyboard, so the next Esc is what leaves the menu.
+            if ( e.key == KEY_ESC ) {
+                short was = active;
+                Close();
+                FocusBar( was );
+                return TRUE;
+            }
 
             // Left/Right move to the adjacent dropdown (wrapping), the usual
             // menu-bar behaviour once a menu is open
@@ -242,6 +345,27 @@ boolean Menu::HandleEvent( const Event &e )
             }
         }
         return FALSE;
+    }
+
+    // Any non-left button pressed while a dropdown is open dismisses it, just
+    // as a left click outside does.  Without this the dropdown stays up while
+    // the click goes to the widget underneath - which then draws over it, and
+    // the eventual RestoreWindow puts the STALE content back.  (Reachable now
+    // that a widget can act on the right button: XArchive marks list rows with
+    // it.)  Left is left to the arms below, which have work to do first.
+    if ( e.kind == Event::EV_MOUSE && active >= 0 &&
+         ( e.buttons & ( RIGHT_BUTTON | CENTER_BUTTON ) ) ) {
+        Close();
+        return TRUE;
+    }
+
+    // The bar has the keyboard with nothing dropped and the user reached for
+    // the mouse instead: give the keyboard up, but let the click through to
+    // whatever it was aimed at (returning TRUE here would eat the first click
+    // after every stray Alt).
+    if ( e.kind == Event::EV_MOUSE && bar_focus >= 0 && active < 0 &&
+         e.buttons != 0 && e.y != bar_row ) {
+        LeaveBar();
     }
 
     if ( e.kind == Event::EV_MOUSE && ( e.buttons & LEFT_BUTTON ) ) {

@@ -87,6 +87,26 @@ MSMouse::~MSMouse( void )
 }
 
 /*---------------------------------------------------------------------------
+ * MSMouse::Reset
+ * Re-run the driver reset after a video mode change.  The cursor comes back
+ * hidden, which is what INT 33h AX=0000h does, so our visible flag is put
+ * back in step with it rather than left claiming a cursor that is gone.
+ *---------------------------------------------------------------------------*/
+void MSMouse::Reset( void )
+{
+    union REGS regs;
+
+    if ( mouse_inited == 0 ) return;
+
+    regs.REGW.ax = 0x0000;
+    MINT( 0x33, &regs, &regs );
+    mouse_visible = 0;
+
+    regs.REGW.ax = 0x0020;      // enable (best-effort, as in the constructor)
+    MINT( 0x33, &regs, &regs );
+}
+
+/*---------------------------------------------------------------------------
  * MSMouse::Show / Hide
  * Show or hide the hardware mouse cursor via INT 33h AX=0001h / 0002h.
  *---------------------------------------------------------------------------*/

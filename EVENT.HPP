@@ -28,4 +28,12 @@ struct Event
 #define KEY_LEFT    0x14B
 #define KEY_RIGHT   0x14D
 
+// A bare Alt, pressed and released without another key in between - the
+// keystroke that puts the highlight on a menu bar.  There is no scan code for
+// it: Alt is a modifier, so the BIOS never queues anything.  App::PollEvent
+// watches the BIOS shift-state byte for the release edge and synthesizes this
+// instead, which is why it lives above the 0x100 extended-key range rather
+// than in it.  A form that does not want it simply never tests for it.
+#define KEY_ALT     0x200
+
 #endif

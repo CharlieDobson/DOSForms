@@ -35,6 +35,14 @@ public:
 
     void Show( void );
     void Hide( void );
+    // Re-initialise the driver.  Needed after the VIDEO MODE changes under a
+    // running program: INT 33h samples the mode when it is reset and reports
+    // its coordinates and its cursor shape in that mode's terms, so a driver
+    // that was reset in 80x25 text keeps handing back text-mode pixels for a
+    // 640x480 screen - the pointer then reaches only the top-left quarter of
+    // it.  A program that sets its mode once, before constructing this, never
+    // needs to call it.
+    void Reset( void );
     int IsInited( void ) const;
     int Status( void );
     int X( void ) const;        // last cursor X read by Status() (pixels; /8 for column)

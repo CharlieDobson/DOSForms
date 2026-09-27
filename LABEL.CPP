@@ -4,7 +4,8 @@
  *===========================================================================*/
 // Label class implementation file
 
-#include <graph.h>              // MSVC/Watcom text output + video config
+#include <graph.h>              // MSVC/Watcom video config
+#include "screen.hpp"           // DfTextOut - the renderer, text or graphics
 #include <stdio.h>              // _vsnprintf
 #include <string.h>             // strncpy, strlen
 #include "label.hpp"
@@ -103,8 +104,6 @@ void Label::Draw( void )
 
     MouseHide guard( mouse );
 
-    _settextcolor( fg_color );
-    _setbkcolor( bg_color );
-    _settextposition( row + 1, column + 1 );   // stored 0-based -> graph.h 1-based
-    _outtext( text );
+    // stored 0-based -> the renderer's 1-based grid
+    DfTextOut( (short)( row + 1 ), (short)( column + 1 ), text, fg_color, bg_color );
 }

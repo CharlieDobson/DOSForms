@@ -4,16 +4,28 @@
  *===========================================================================*/
 // Popup class implementation file
 
-#include <graph.h>              // MSVC/Watcom text output + video config
+#include <graph.h>              // MSVC/Watcom video config
+#include "screen.hpp"           // DfTextOut - the renderer, text or graphics
 #include <stdlib.h>             // required for NULL
 #include <stdio.h>              // _snprintf
 #include <string.h>             // strncpy
 #include "popup.hpp"
 #include "moushide.hpp"         // MouseHide cursor guard
 
+/* Every constructor starts the save area empty; SaveWindow allocates it to
+ * the rectangle it is actually asked to save.  A private helper rather than
+ * four lines repeated eight times. */
+void Popup::InitBuffer( void )
+{
+    screen_buffer = 0;
+    screen_cells  = 0;
+    screen_saved  = FALSE;
+    saved_top = saved_left = saved_bottom = saved_right = 0;
+}
+
 Popup::Popup( void ) : DOSForms()
 {
-    screen_buffer = (unsigned short*)calloc( video.numtextrows * video.numtextcols + 1, sizeof( unsigned short ) );
+    InitBuffer();
 
     fg_color = FG_BLACK;
     coordinates.row = 0;
@@ -28,7 +40,7 @@ Popup::Popup( void ) : DOSForms()
 
 Popup::Popup( const char* title ) : DOSForms()
 {
-    screen_buffer = (unsigned short*)calloc( video.numtextrows * video.numtextcols + 1, sizeof( unsigned short ) );
+    InitBuffer();
 
     fg_color = FG_BLACK;
     coordinates.row = 0;
@@ -48,7 +60,7 @@ Popup::Popup( const char* title ) : DOSForms()
 
 Popup::Popup( const coordinates_t* coordinates ) : DOSForms()
 {
-    screen_buffer = (unsigned short*)calloc( video.numtextrows * video.numtextcols + 1, sizeof( unsigned short ) );
+    InitBuffer();
 
     fg_color = FG_BLACK;
     this->coordinates.row = 0;
@@ -67,7 +79,7 @@ Popup::Popup( const coordinates_t* coordinates ) : DOSForms()
 
 Popup::Popup( const coordinates_t* coordinates, const char* title ) : DOSForms()
 {
-    screen_buffer = (unsigned short*)calloc( video.numtextrows * video.numtextcols + 1, sizeof( unsigned short ) );
+    InitBuffer();
 
     fg_color = FG_BLACK;
     this->coordinates.row = 0;
@@ -92,7 +104,7 @@ Popup::Popup( const coordinates_t* coordinates, const char* title ) : DOSForms()
 Popup::Popup( const foreground_color_t foreground, const background_color_t background )
     : DOSForms( foreground, background )
 {
-    screen_buffer = (unsigned short*)calloc( video.numtextrows * video.numtextcols + 1, sizeof( unsigned short ) );
+    InitBuffer();
 
     coordinates.row = 0;
     coordinates.column = 0;
@@ -107,7 +119,7 @@ Popup::Popup( const foreground_color_t foreground, const background_color_t back
 Popup::Popup( const foreground_color_t foreground, const background_color_t background, const char* title )
     : DOSForms( foreground, background )
 {
-    screen_buffer = (unsigned short*)calloc( video.numtextrows * video.numtextcols + 1, sizeof( unsigned short ) );
+    InitBuffer();
 
     coordinates.row = 0;
     coordinates.column = 0;
@@ -127,7 +139,7 @@ Popup::Popup( const foreground_color_t foreground, const background_color_t back
 Popup::Popup( const foreground_color_t foreground, const background_color_t background, const coordinates_t* coordinates )
     : DOSForms( foreground, background )
 {
-    screen_buffer = (unsigned short*)calloc( video.numtextrows * video.numtextcols + 1, sizeof( unsigned short ) );
+    InitBuffer();
 
     this->coordinates.row = 0;
     this->coordinates.column = 0;
@@ -146,7 +158,7 @@ Popup::Popup( const foreground_color_t foreground, const background_color_t back
 Popup::Popup( const foreground_color_t foreground, const background_color_t background, const coordinates_t* coordinates, const char* title )
     : DOSForms( foreground, background )
 {
-    screen_buffer = (unsigned short*)calloc( video.numtextrows * video.numtextcols + 1, sizeof( unsigned short ) );
+    InitBuffer();
 
     this->coordinates.row = 0;
     this->coordinates.column = 0;
@@ -186,8 +198,6 @@ boolean Popup::SaveWindow( void )
 {
     if ( !IsTextMode() ) return FALSE;
 
-    if ( !screen_buffer ) return FALSE;
-
     if ( coordinates.row == 0 && coordinates.column == 0
          && coordinates.end_row == 0 && coordinates.end_column == 0 ) return FALSE;
 
@@ -203,28 +213,36 @@ boolean Popup::SaveWindow( void )
         end_column += 2;
     }
 
-    // clamp to the screen so direct video access stays in bounds
+    // clamp to the screen so the save stays in bounds
     if ( end_row > (unsigned short)( video.numtextrows - 1 ) ) end_row = video.numtextrows - 1;
     if ( end_column > (unsigned short)( video.numtextcols - 1 ) ) end_column = video.numtextcols - 1;
+    if ( end_row < start_row || end_column < start_column ) return FALSE;
+
+    // grow the buffer to this rectangle if what we have is too small
+    {
+        unsigned long want = (unsigned long)( end_row - start_row + 1 ) *
+                             (unsigned long)( end_column - start_column + 1 );
+        if ( want > screen_cells ) {
+            df_cell_t *grown = (df_cell_t *)calloc( (size_t)want, sizeof( df_cell_t ) );
+            if ( !grown ) return FALSE;     // leave the old buffer alone
+            if ( screen_buffer ) free( screen_buffer );
+            screen_buffer = grown;
+            screen_cells  = want;
+        }
+    }
 
     MouseHide guard( mouse );
 
-    // save screen contents to buffer (direct video memory read)
-    unsigned vseg = ( video.mode == _TEXTMONO ) ? 0xB000 : 0xB800;
-#ifdef __386__
-    // DOS/4GW flat model: text buffer is directly at linear 0xB8000 / 0xB0000
-    unsigned short *vid = (unsigned short *)( (unsigned long)vseg << 4 );
-#else
-    unsigned short far *vid = (unsigned short far *)( (unsigned long)vseg << 16 );
-#endif
-    unsigned short *buf = screen_buffer;
-    unsigned short r, c;
-    for ( r = start_row; r <= end_row; ++r ) {
-        unsigned off = (unsigned)r * video.numtextcols + start_column;
-        for ( c = start_column; c <= end_column; ++c ) {
-            *buf++ = vid[ off++ ];
-        }
-    }
+    // 0-based coordinates here; the renderer's grid is 1-based
+    DfScreen()->CellsRead( (short)( start_row + 1 ), (short)( start_column + 1 ),
+                           (short)( end_row + 1 ), (short)( end_column + 1 ),
+                           screen_buffer );
+
+    saved_top    = start_row;
+    saved_left   = start_column;
+    saved_bottom = end_row;
+    saved_right  = end_column;
+    screen_saved = TRUE;
 
     return TRUE;
 }
@@ -233,44 +251,16 @@ boolean Popup::RestoreWindow( void )
 {
     if ( !IsTextMode() ) return FALSE;
 
-    if ( !screen_buffer ) return FALSE;
-
-    if ( coordinates.row == 0 && coordinates.column == 0
-         && coordinates.end_row == 0 && coordinates.end_column == 0 ) return FALSE;
-
-    // define restore area
-    unsigned short start_row = coordinates.row;
-    unsigned short start_column = coordinates.column;
-    unsigned short end_row = coordinates.end_row;
-    unsigned short end_column = coordinates.end_column;
-
-    // account for dropshadow
-    if ( drop_shadow ) {
-        ++end_row;
-        end_column += 2;
-    }
-
-    // clamp to the screen so direct video access stays in bounds
-    if ( end_row > (unsigned short)( video.numtextrows - 1 ) ) end_row = video.numtextrows - 1;
-    if ( end_column > (unsigned short)( video.numtextcols - 1 ) ) end_column = video.numtextcols - 1;
+    // Nothing was ever saved - a popup that was never drawn, or whose save
+    // could not be allocated.  Putting an empty buffer back would paint a
+    // black hole over whatever is there.
+    if ( !screen_buffer || !screen_saved ) return FALSE;
 
     MouseHide guard( mouse );
 
-    // restore screen contents from buffer (direct video memory write)
-    unsigned vseg = ( video.mode == _TEXTMONO ) ? 0xB000 : 0xB800;
-#ifdef __386__
-    unsigned short *vid = (unsigned short *)( (unsigned long)vseg << 4 );
-#else
-    unsigned short far *vid = (unsigned short far *)( (unsigned long)vseg << 16 );
-#endif
-    unsigned short *buf = screen_buffer;
-    unsigned short r, c;
-    for ( r = start_row; r <= end_row; ++r ) {
-        unsigned off = (unsigned)r * video.numtextcols + start_column;
-        for ( c = start_column; c <= end_column; ++c ) {
-            vid[ off++ ] = *buf++;
-        }
-    }
+    DfScreen()->CellsWrite( (short)( saved_top + 1 ), (short)( saved_left + 1 ),
+                            (short)( saved_bottom + 1 ), (short)( saved_right + 1 ),
+                            screen_buffer );
 
     return TRUE;
 }
@@ -295,7 +285,7 @@ void Popup::Draw( void )
 
     if ( drop_shadow ) {
         // draw drop shadow (offset one row down, two cols right)
-        FillBox( top + 1, left + 2, bottom + 1, right + 2, BG_BLACK );
+        DfShade( top + 1, left + 2, bottom + 1, right + 2 );
     }
 
     // draw the border, then fill the interior inside it
@@ -329,9 +319,7 @@ void Popup::Draw( void )
         }
 
         _snprintf( temp, sizeof( temp ), " %s ", title ); // ensure spaces surround title
-        _settextcolor( fg_color );
-        _setbkcolor( bg_color );
-        _settextposition( coordinates.row + 1, title_column + 1 );  // 0-based -> 1-based
-        _outtext( temp );
+        DfTextOut( (short)( coordinates.row + 1 ), (short)( title_column + 1 ),  // 0-based -> 1-based
+                   temp, fg_color, bg_color );
     }
 }

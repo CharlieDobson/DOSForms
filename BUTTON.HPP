@@ -41,6 +41,10 @@ public:
     boolean HitTest( short x, short y ) const;        // is text cell (x,y) inside the button?
     void SetCoordinates( const unsigned short row, const unsigned short column, const unsigned short end_row, const unsigned short end_column );
     void SetCoordinates( const unsigned short row, const unsigned short column );
+    // Size a flat one-row "[ Label ]" control at (row, column): exactly
+    // strlen(label) + 4 cells wide, so the drawn glyphs and the rectangle
+    // HitTest checks are the same cells.  Use this for dialog OK/Cancel rows.
+    void SetSingleRow( const unsigned short row, const unsigned short column );
     Button& operator=( const Button& other );
 };
 

@@ -5,7 +5,8 @@
 // Button class implementation
 
 #include <stdlib.h>             // calloc, free
-#include <graph.h>              // MSVC/Watcom text output + video config
+#include <graph.h>              // MSVC/Watcom video config
+#include "screen.hpp"           // DfTextOut - the renderer, text or graphics
 #include <string.h>             // strlen
 #include <ctype.h>              // toupper
 #include "button.hpp"
@@ -132,6 +133,10 @@ Button::Button( const foreground_color_t foreground, const background_color_t ba
 
 Button::Button( const Button& other ) : DOSForms( other.fg_color, other.bg_color )
 {
+    // carry the mouse over: a copy that silently lost it would still draw, but
+    // its Draw would stop hiding the cursor and callers that rely on the copy
+    // being wired up would get a control the mouse cannot reach
+    mouse = other.mouse;
     coordinates = other.coordinates;
     strncpy( label, other.label, sizeof( label ) - 1 );
     label[sizeof( label ) - 1] = '\0';
@@ -148,6 +153,7 @@ Button& Button::operator=( const Button& other )
     if ( this != &other ) {
         fg_color = other.fg_color;
         bg_color = other.bg_color;
+        mouse = other.mouse;        // see the copy constructor
         coordinates = other.coordinates;
         strncpy( label, other.label, sizeof( label ) - 1 );
         label[sizeof( label ) - 1] = '\0';
@@ -179,6 +185,17 @@ void Button::SetCoordinates( const unsigned short row, const unsigned short colu
                       SetCoordinates( row, column, row + 2, column + (unsigned short)strlen( label ) + 2 );
 }
 
+void Button::SetSingleRow( const unsigned short row, const unsigned short column )
+{
+    // "[ Label ]" = 1 bracket + 1 pad + label + 1 pad + 1 bracket, so the last
+    // cell is column + strlen(label) + 3.  Draw() takes the flat one-row path
+    // because row == end_row, and HitTest then covers exactly those cells.
+    unsigned short width = ( label[0] == '\0' )
+                           ? 4
+                           : (unsigned short)strlen( label ) + 4;
+    SetCoordinates( row, column, row, column + width - 1 );
+}
+
 void Button::Draw( void )
 {
     if ( !IsTextMode() ) return;
@@ -206,27 +223,23 @@ void Button::Draw( void )
     if ( coordinates.row == coordinates.end_row ) {
         short inner = right - left - 1;         // cells between the two brackets
         FillBox( top, left, top, right, bg_color );
-        _settextcolor( fg_color );
-        _setbkcolor( bg_color );
-        _settextposition( top, left );
-        _outtext( "[" );
-        _settextposition( top, right );
-        _outtext( "]" );
+        DfTextOut( top, left,  "[", fg_color, bg_color );
+        DfTextOut( top, right, "]", fg_color, bg_color );
         if ( label[0] != '\0' && inner > 0 ) {
             char temp[24];
             short len = (short)strlen( label );
             if ( len > inner ) len = inner;
             strncpy( temp, label, len );
             temp[len] = '\0';
-            _settextposition( top, left + 1 + ( inner - len ) / 2 );
-            _outtext( temp );
+            DfTextOut( top, (short)( left + 1 + ( inner - len ) / 2 ), temp,
+                       fg_color, bg_color );
         }
         return;
     }
 
     // draw drop shadow if specified (offset one row down, two cols right)
     if ( drop_shadow ) {
-        FillBox( top + 1, left + 2, bottom + 1, right + 2, BG_BLACK );
+        DfShade( top + 1, left + 2, bottom + 1, right + 2 );
     }
 
     // fill the button face, then draw the border on top (unless borderless)
@@ -238,8 +251,13 @@ void Button::Draw( void )
     // draw button label if specified
     if ( label[0] != '\0' ) {
         short button_width = coordinates.end_column - coordinates.column;
-        char* temp = (char*)calloc( button_width, sizeof( char ) );
+        char* temp;
 
+        // strncpy below asks for button_width - 2 chars; a 2-cell-or-narrower
+        // button would wrap that to a huge size_t and run off the allocation
+        if ( button_width < 3 ) return;
+
+        temp = (char*)calloc( button_width, sizeof( char ) );
         if ( !temp ) return;
 
         strncpy( temp, label, button_width - 2 );
@@ -251,10 +269,8 @@ void Button::Draw( void )
         short label_column = coordinates.column +
                           ( button_width / 2 ) - ( label_length / 2 );
 
-        _settextcolor( fg_color );
-        _setbkcolor( bg_color );
-        _settextposition( label_row + 1, label_column + 1 );
-        _outtext( temp );
+        DfTextOut( (short)( label_row + 1 ), (short)( label_column + 1 ), temp,
+                   fg_color, bg_color );
         free( temp );
     }
 }
