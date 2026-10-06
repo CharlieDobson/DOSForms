@@ -34,6 +34,7 @@
 #include "progbox.hpp"
 #include "textview.hpp"
 #include "filebox.hpp"
+#include "criterr.hpp"
 #include "fieldpan.hpp"
 #include "segbar.hpp"
 #include "checkbox.hpp"
@@ -45,6 +46,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <time.h>              // clock() - the demo's stand-in for real work
 
 static App        *g_app   = 0;
@@ -54,6 +56,9 @@ static SegmentBar *g_bar   = 0;
 static StatusBar  *g_stat  = 0;
 static MSMouse    *g_mouse = 0;
 static int         g_auto  = 0;     /* /T: drive every dialog from the peek */
+static int         g_treeRows = 0;  /* /T: what the folder tree found       */
+static int         g_treeOpen = 0;
+static char        g_treeAt[96] = "";
 
 /*===========================================================================*
  * A tree model, because the list does not hold one
@@ -389,8 +394,11 @@ static void ActOptions( void *user )
             if ( k == 13 ) { done = 1;  break; }
             if ( k == 0 || k == 0xE0 )
             {
+                /* The second half of an extended key, asked for only if it
+                 * is there: getch() would wait for it.  See App::PollEvent. */
+                if ( !kbhit() ) continue;
                 ev.kind = Event::EV_KEY;
-                ev.key  = 0x100 | getch();
+                ev.key  = 0x100 | ( getch() & 0xFF );
                 ev.x = ev.y = 0; ev.buttons = 0;
             }
             else
@@ -518,9 +526,13 @@ static void ActOpen( void *user )
     Status( line );
 }
 
+/* The same box with the file list off and a prompt on: walk the tree, and
+ * finish the path by hand - which is how a folder that is not there yet is
+ * named. */
 static void ActFolder( void *user )
 {
-    FileBox fb( FG_BLACK, BG_WHITE, "Choose a Folder" );
+    FileBox fb( FG_BLUE, BG_WHITE, "Choose a Folder",
+                "Walk the tree, then add to the path if you like:" );
     char    line[96];
 
     (void)user;
@@ -529,6 +541,88 @@ static void ActFolder( void *user )
     if ( fb.Show() ) sprintf( line, "Folder: %.60s", fb.Path() );
     else             strcpy( line, "No folder chosen" );
     Status( line );
+
+    /* Headless, the peek proves the box painted; this proves the tree under
+     * it READ THE DISK, which is the part with a 16-bit way of going wrong.
+     * Open it where we are standing, open the folder under the highlight,
+     * and keep the row counts for main to print. */
+    if ( g_auto )
+    {
+        fb.TestOpen();
+        g_treeRows = fb.TreeRows();
+        strncpy( g_treeAt, fb.FieldText(), sizeof( g_treeAt ) - 1 );
+        g_treeAt[sizeof( g_treeAt ) - 1] = '\0';
+        fb.TestKey( '+' );
+        g_treeOpen = fb.TreeRows();
+        fb.RestoreWindow();
+    }
+}
+
+/* A folder chooser that shows the files as well: they cannot be picked, but
+ * they say what is in a folder before it is chosen. */
+static void ActFolderFiles( void *user )
+{
+    FileBox fb( FG_BLACK, BG_WHITE, "Choose a Folder" );
+    char    line[96];
+
+    (void)user;
+    fb.SetMouse( g_mouse );
+    fb.SetMode( FileBox::FB_DIR );
+    fb.ShowFiles( TRUE );
+    if ( fb.Show() ) sprintf( line, "Folder: %.60s", fb.Path() );
+    else             strcpy( line, "No folder chosen" );
+    Status( line );
+}
+
+/*---- A drive with nothing in it ------------------------------------------- *
+ * Set DFCRIT to a drive letter and the /T run opens that drive in the tree.
+ * With no disk in it DOS raises a critical error, the toolkit's handler
+ * fails the call, and the box asks - this script, in a test: Retry the
+ * first time and Cancel the second.  Two asks and a run that ENDS is the
+ * proof; with DOS's own handler in place the run would stop at "Abort,
+ * Retry, Fail?" and wait for somebody.
+ *---------------------------------------------------------------------------*/
+static int g_critAsks  = 0;
+static int g_critCode  = -1;
+static int g_critDrive = -1;
+static int g_critFound = 0;
+
+static int CritScript( int code, int drive )
+{
+    ++g_critAsks;
+    g_critCode  = code;
+    g_critDrive = drive;
+    return ( g_critAsks == 1 ) ? 1 : 0;
+}
+
+static void ProbeEmptyDrive( char letter )
+{
+    FileBox fb( FG_BLACK, BG_WHITE, "Choose a Folder" );
+    int     row, rows;
+
+    fb.SetMouse( g_mouse );
+    fb.SetMode( FileBox::FB_DIR );
+    fb.SetPath( "C:\\" );
+    fb.TestOpen();
+
+    rows = fb.TreeRows();
+    fb.TestKey( 0x100 | _KB_HOME );
+    for ( row = 0; row < rows; ++row )
+    {
+        const char *at = fb.FieldText();
+
+        if ( toupper( (unsigned char)at[0] ) == toupper( (unsigned char)letter ) &&
+             at[1] == ':' && at[3] == '\0' )
+        {
+            g_critFound = 1;
+            DfSetCritAsk( CritScript );
+            fb.TestKey( '+' );
+            DfSetCritAsk( 0 );
+            break;
+        }
+        fb.TestKey( KEY_DOWN );
+    }
+    fb.RestoreWindow();
 }
 
 static void ActSave( void *user )
@@ -588,6 +682,9 @@ int main( int argc, char **argv )
     /* Before the first mode set and before the mouse - see DOSFORMS.HPP. */
     DfVectorGuard vectors;
 
+    /* A drive with no disk in it is ours to report - see CRITERR.HPP. */
+    DfCritGuard   critical;
+
     _setvideomode( _TEXTC80 );
     savedCursor = _gettextcursor();
     _settextcursor( 0x2000 );
@@ -616,6 +713,7 @@ int main( int argc, char **argv )
         menu.AddItem( fm, "Open...",           'O', ActOpen,   0 );
         menu.AddItem( fm, "Save As...",        'S', ActSave,   0 );
         menu.AddItem( fm, "Choose Folder...",  'C', ActFolder, 0 );
+        menu.AddItem( fm, "Folder, with files...", 'F', ActFolderFiles, 0 );
         menu.AddItem( fm, "Exit",              'X', ActExit,   0 );
         tr = menu.AddMenu( "Tree", 'T' );
         menu.AddItem( tr, "Expand All",        'E', ActExpandAll,   0 );
@@ -666,8 +764,10 @@ int main( int argc, char **argv )
             ActInput( 0 );    ActPassword( 0 ); ActOptions( 0 );
             ActProgress( 0 ); ActWait( 0 );     ActView( 0 );
             ActOpen( 0 );     ActSave( 0 );     ActFolder( 0 );
+            ActFolderFiles( 0 );
             ActExpandAll( 0 );
             ActCollapseAll( 0 );
+            if ( getenv( "DFCRIT" ) ) ProbeEmptyDrive( getenv( "DFCRIT" )[0] );
             DfSetModalPeek( 0 );
         }
         else
@@ -678,12 +778,19 @@ int main( int argc, char **argv )
 
     _settextcursor( savedCursor );
     _setvideomode( _DEFAULTMODE );
-    /* The /T walk opens twelve boxes, but only TEN of them are modal: the
-     * progress box and the wait box do not wait for input, so there is
+    /* The /T walk opens thirteen boxes, but only ELEVEN of them are modal:
+     * the progress box and the wait box do not wait for input, so there is
      * nobody for them to ask and they have no peek to call.  Printing the
      * count turns "it did not crash" into "every dialog that waits painted
      * and came down again", which is what a headless run can prove. */
-    if ( g_auto ) printf( "modals painted: %d of 10\n", g_peeks );
+    if ( g_auto ) printf( "modals painted: %d of 11\n", g_peeks );
+    if ( g_auto ) printf( "folder tree: %d rows at %s, %d with it open\n",
+                          g_treeRows, g_treeAt, g_treeOpen );
+    if ( g_auto && getenv( "DFCRIT" ) )
+    {
+        printf( "empty drive: found=%d asks=%d code=%d drive=%d\n",
+                g_critFound, g_critAsks, g_critCode, g_critDrive );
+    }
     printf( "DOSForms demo done.\n" );
     return 0;
 }

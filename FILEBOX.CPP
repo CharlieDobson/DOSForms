@@ -3,79 +3,160 @@
  * Target: MSVC 1.52c / Open Watcom 1.9  DOS
  *===========================================================================*/
 #include "filebox.hpp"
+#include "criterr.hpp"          // DfCritClear / DfCritHit / DfCritAsk
 #include "msmouse.hpp"          // LEFT_BUTTON + MSMouse status for clicks
 #include "moushide.hpp"         // hide the cursor while painting
 #include "screen.hpp"           // DfTextOut - the renderer, text or graphics
 #include <conio.h>
 #include <string.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <ctype.h>
-#include <direct.h>             // getcwd, chdir
-#include <dos.h>                // _dos_getdrive, _dos_setdrive
+#include <stdlib.h>             // _fullpath
+#include <dos.h>                // _dos_getfileattr
 
-#define FB_W        60
-#define FB_H        20
+#define FB_H            20
+#define FB_W_TREE       60      /* the tree on its own                       */
+#define FB_W_BOTH       76      /* the tree and the file list                */
+#define FB_TREE_COLS    30      /* the tree's share of that, border included */
 
-FileBox::FileBox( const foreground_color_t foreground,
-                  const background_color_t background, const char *titleText )
-    : Popup( foreground, background, titleText ),
-      list( FG_BLACK, BG_WHITE )
+static int IsSep( char c )
+{
+    return ( c == '\\' || c == '/' );
+}
+
+/* What was typed, made fit to hand to DOS: no blanks round it, and no two
+ * separators together - "C:\" with "\NEW" typed after it is "C:\\NEW", and
+ * real DOS reads a doubled separator as the start of a network name.  A
+ * pair at the very front is left alone, because there it IS one. */
+static void TidyPath( char *dst, int size, const char *src )
+{
+    int used = 0;
+
+    while ( *src == ' ' ) ++src;
+    for ( ; *src && used < size - 1; ++src )
+    {
+        if ( IsSep( *src ) && used > 1 && IsSep( dst[used-1] ) ) continue;
+        dst[used++] = *src;
+    }
+    while ( used > 0 && dst[used-1] == ' ' ) --used;
+    dst[used] = '\0';
+}
+
+/* A folder and something in it, with one separator between them whether or
+ * not the folder already ends in one - the root of a drive does. */
+static void JoinPath( char *dst, int size, const char *dir, const char *leaf )
+{
+    int used = 0;
+
+    if ( size <= 0 ) return;
+    while ( dir[used] && used < size - 2 ) { dst[used] = dir[used]; ++used; }
+    if ( used > 0 && !IsSep( dst[used-1] ) ) dst[used++] = '\\';
+    while ( *leaf && used < size - 1 ) dst[used++] = *leaf++;
+    dst[used] = '\0';
+}
+
+void FileBox::Init( const char *promptText )
 {
     border_style       = BORDER_DOUBLE_LINE;
     drop_shadow        = TRUE;
     text_justification = CENTER;
 
-    curPath[0] = result[0] = startDir[0] = '\0';
-    name[0]  = '\0';
-    nameLen  = 0;
-    nameCur  = 0;
-    mode     = FB_OPEN;
-    boxW     = FB_W;
-    boxH     = FB_H;
-    done     = 0;
-    pending  = -1;
+    prompt[0] = startPath[0] = name[0] = treePath[0] = result[0] = '\0';
+    treeBox.row = treeBox.column = treeBox.end_row = treeBox.end_column = 0;
+    fileBox = treeBox;
 
-    list.SetSelHighlight( FG_BLACK, BG_CYAN );
+    mode        = FB_OPEN;
+    wantFiles   = -1;
+    boxW        = FB_W_BOTH;
+    boxH        = FB_H;
+    done        = 0;
+    pendingNode = -1;
+    pendingFile = -1;
+    focus       = FB_AT_TREE;
+    lastList    = FB_AT_TREE;
+    fileSel     = -1;
+    driveOpen   = 1;
+    asked       = 0;
+    iconDrive   = DF_ICON_NONE;
+    iconFolder  = DF_ICON_NONE;
+    iconFile    = DF_ICON_NONE;
+
+    if ( promptText )
+    {
+        strncpy( prompt, promptText, sizeof( prompt ) - 1 );
+        prompt[sizeof( prompt ) - 1] = '\0';
+    }
+
+    files.SetFilesOnly( 1 );
+    field.SetMaxLength( FB_PATHLEN - 1 );
 }
 
-void FileBox::SetMode( int m )
+FileBox::FileBox( const foreground_color_t foreground,
+                  const background_color_t background, const char *titleText )
+    : Popup( foreground, background, titleText ),
+      treeList( FG_BLACK, BG_WHITE ),
+      fileList( FG_BLACK, BG_WHITE ),
+      field( FG_BRIGHT_WHITE, BG_BLUE )
 {
-    mode = m;
-    scan.SetDirsOnly( ( m == FB_DIR ) ? 1 : 0 );
+    Init( 0 );
 }
 
-void FileBox::SetFilter( const char *patterns )
+FileBox::FileBox( const foreground_color_t foreground,
+                  const background_color_t background,
+                  const char *titleText, const char *promptText )
+    : Popup( foreground, background, titleText ),
+      treeList( FG_BLACK, BG_WHITE ),
+      fileList( FG_BLACK, BG_WHITE ),
+      field( FG_BRIGHT_WHITE, BG_BLUE )
 {
-    scan.SetFilter( patterns );
+    Init( promptText );
 }
+
+void FileBox::SetMode( int m )            { mode = m; }
+void FileBox::ShowFiles( boolean on )     { wantFiles = on ? 1 : 0; }
+void FileBox::SetFilter( const char *patterns ) { files.SetFilter( patterns ); }
 
 void FileBox::SetStartDir( const char *dir )
 {
-    startDir[0] = '\0';
+    startPath[0] = '\0';
     if ( !dir ) return;
-    strncpy( startDir, dir, sizeof( startDir ) - 1 );
-    startDir[sizeof( startDir ) - 1] = '\0';
+    strncpy( startPath, dir, sizeof( startPath ) - 1 );
+    startPath[sizeof( startPath ) - 1] = '\0';
 }
 
 void FileBox::SetName( const char *initial )
 {
     name[0] = '\0';
-    if ( initial )
-    {
-        strncpy( name, initial, sizeof( name ) - 1 );
-        name[sizeof( name ) - 1] = '\0';
-    }
-    nameLen = (int)strlen( name );
-    nameCur = nameLen;
+    if ( !initial ) return;
+    strncpy( name, initial, sizeof( name ) - 1 );
+    name[sizeof( name ) - 1] = '\0';
+}
+
+void FileBox::SetIcons( int driveIcon, int folderIcon, int fileIcon )
+{
+    iconDrive  = driveIcon;
+    iconFolder = folderIcon;
+    iconFile   = fileIcon;
+}
+
+boolean FileBox::HasFiles( void ) const
+{
+    if ( wantFiles >= 0 ) return (boolean)( wantFiles ? TRUE : FALSE );
+    return (boolean)( ( mode == FB_DIR ) ? FALSE : TRUE );
+}
+
+const char *FileBox::FieldLabel( void ) const
+{
+    return ( mode == FB_DIR ) ? "Folder:" : "File:";
 }
 
 /*---- Layout --------------------------------------------------------------- *
  * Rows inside the box, 0-based from its top border:
  *   +0            border, with the title on it
- *   +1            the path being browsed
- *   +2 .. +h-4    the list (bordered: it draws its own frame)
- *   +h-3          the name field, in FB_SAVE - blank otherwise
+ *   +1            the prompt, when there is one
+ *   +1/2 .. +h-5  the tree, and the file list beside it (bordered: a list
+ *                 draws its own frame)
+ *   +h-4          the field
+ *   +h-3          blank
  *   +h-2          the buttons
  *   +h-1          border
  *---------------------------------------------------------------------------*/
@@ -83,45 +164,70 @@ void FileBox::Place( void )
 {
     short rows = DfRows() ? DfRows() : 25;
     short cols = DfCols() ? DfCols() : 80;
-    short w = (short)boxW, h;
-    short left, top;
+    short wide, high, left, top;
+    int   want;
 
-    if ( w > cols - 2 ) w = (short)( cols - 2 );
-    if ( w < 30 ) w = 30;
+    /* Wide enough for both panes or for the one, then for the prompt, and
+     * never past the screen. */
+    want = HasFiles() ? FB_W_BOTH : FB_W_TREE;
+    if ( (int)strlen( prompt ) + 6 > want ) want = (int)strlen( prompt ) + 6;
+    if ( want > cols - 2 ) want = cols - 2;
+    if ( want < 30 )       want = 30;
+    wide = (short)want;
 
     /* Grow with the screen rather than staying the size a 25-row screen
      * needed: on the graphics renderer's thirty rows a twenty-row dialog is
-     * a postage stamp, and the list is the thing that wants the space. */
-    h = (short)( rows - 4 );
-    if ( h > FB_H + 6 ) h = FB_H + 6;
-    if ( h < 12 ) h = 12;
+     * a postage stamp, and the lists are what want the space. */
+    high = (short)( rows - 4 );
+    if ( high > FB_H + 6 ) high = FB_H + 6;
+    if ( high < 12 ) high = 12;
 
-    boxW = w;
-    boxH = h;
-    left = (short)( ( cols - w ) / 2 );
-    top  = (short)( ( rows - h ) / 2 );
+    boxW = wide;
+    boxH = high;
+    left = (short)( ( cols - wide ) / 2 );
+    top  = (short)( ( rows - high ) / 2 );
     if ( left < 0 ) left = 0;
     if ( top  < 0 ) top  = 0;
 
-    SetCoordinates( top, left, (short)( top + h - 1 ), (short)( left + w - 1 ) );
+    SetCoordinates( top, left, (short)( top + high - 1 ), (short)( left + wide - 1 ) );
 }
 
 void FileBox::LayOut( void )
 {
-    short row0 = coordinates.row;
-    short col0 = coordinates.column;
+    short row0   = coordinates.row;
+    short col0   = coordinates.column;
     short btnRow = (short)( coordinates.end_row - 1 );
+    short fldRow = (short)( coordinates.end_row - 3 );
+    short fldCol = (short)( col0 + 4 + (short)strlen( FieldLabel() ) );
     short okW  = 6;                 // "[ OK ]"
     short canW = 10;                // "[ Cancel ]"
-    short gap  = 2;
+    short gap  = 4;
     short start = (short)( col0 + ( boxW - ( okW + gap + canW ) ) / 2 );
 
     if ( start < col0 + 1 ) start = (short)( col0 + 1 );
 
-    list.SetMouse( mouse );
-    list.SetRegion( (short)( row0 + 2 ), (short)( col0 + 1 ),
-                    (short)( coordinates.end_row - 3 ),
-                    (short)( coordinates.end_column - 1 ) );
+    treeBox.row        = (short)( row0 + ( prompt[0] ? 2 : 1 ) );
+    treeBox.column     = (short)( col0 + 2 );
+    treeBox.end_row    = (short)( coordinates.end_row - 4 );
+    treeBox.end_column = (short)( coordinates.end_column - 2 );
+
+    fileBox = treeBox;
+    if ( HasFiles() )
+    {
+        treeBox.end_column = (short)( treeBox.column + FB_TREE_COLS - 1 );
+        fileBox.column     = (short)( treeBox.end_column + 1 );
+    }
+
+    treeList.SetMouse( mouse );
+    treeList.SetRegion( treeBox.row, treeBox.column,
+                        treeBox.end_row, treeBox.end_column );
+    fileList.SetMouse( mouse );
+    fileList.SetRegion( fileBox.row, fileBox.column,
+                        fileBox.end_row, fileBox.end_column );
+
+    field.SetMouse( mouse );
+    field.SetPosition( fldRow, fldCol,
+                       (short)( coordinates.end_column - 2 - fldCol ) );
 
     btnOk     = Button( FG_WHITE, BG_CYAN );
     btnCancel = Button( FG_WHITE, BG_CYAN );
@@ -134,259 +240,681 @@ void FileBox::LayOut( void )
                             (unsigned short)( start + okW + gap ) );
 }
 
-/* The path being browsed, cut from the LEFT when it is too long: the end of
- * a path is the part that says where you are. */
-void FileBox::DrawPathRow( void )
+/*---- The models feed the lists -------------------------------------------- */
+
+int FileBox::TreeDepthOf( void *user, int row )
 {
-    char line[FB_PATHLEN + 4];
-    int  room = boxW - 4;
-    int  n;
-    const char *p = scan.IsDriveList() ? "Drives" : scan.Path();
-
-    if ( room < 4 ) room = 4;
-    if ( room > (int)sizeof( line ) - 1 ) room = (int)sizeof( line ) - 1;
-
-    n = (int)strlen( p );
-    if ( n <= room ) strcpy( line, p );
-    else
-    {
-        strcpy( line, "..." );
-        strcpy( line + 3, p + n - ( room - 3 ) );
-    }
-    for ( n = (int)strlen( line ); n < room; ++n ) line[n] = ' ';
-    line[room] = '\0';
-
-    DfTextOut( (short)( coordinates.row + 2 ), (short)( coordinates.column + 3 ),
-               line, FG_BRIGHT_WHITE, bg_color );
+    FileBox *box = (FileBox *)user;
+    return box ? box->tree.Depth( row ) : 0;
 }
 
-/* FB_SAVE only: the editable file name, with the cursor cell inverted - the
- * same look as InputBox's field, because it is the same thing. */
-void FileBox::DrawNameRow( void )
+int FileBox::TreeHasKids( void *user, int row )
 {
-    char line[FB_NAMELEN + 4];
-    char cell[2];
-    int  room = boxW - 10;
-    int  i;
-
-    if ( mode != FB_SAVE ) return;
-    if ( room < 8 ) room = 8;
-    if ( room > (int)sizeof( line ) - 1 ) room = (int)sizeof( line ) - 1;
-
-    DfTextOut( (short)( coordinates.end_row - 2 ),
-               (short)( coordinates.column + 3 ), "Name:", fg_color, bg_color );
-
-    for ( i = 0; i < room; ++i ) line[i] = ( i < nameLen ) ? name[i] : ' ';
-    line[room] = '\0';
-    DfTextOut( (short)( coordinates.end_row - 2 ),
-               (short)( coordinates.column + 9 ), line, FG_BLACK, BG_WHITE );
-
-    if ( nameCur >= 0 && nameCur < room )
-    {
-        cell[0] = ( nameCur < nameLen ) ? name[nameCur] : ' ';
-        cell[1] = '\0';
-        DfTextOut( (short)( coordinates.end_row - 2 ),
-                   (short)( coordinates.column + 9 + nameCur ),
-                   cell, FG_WHITE, BG_BLACK );
-    }
+    FileBox *box = (FileBox *)user;
+    return box ? box->tree.HasKids( row ) : 0;
 }
 
-/*---- The model feeds the list --------------------------------------------- */
-
-void FileBox::RowText( void *user, int index, char *buf, int buflen )
+int FileBox::TreeIsOpen( void *user, int row )
 {
-    FileBox *fb = (FileBox *)user;
-    char     size[16];
-    char     date[20];
+    FileBox *box = (FileBox *)user;
+    return box ? box->tree.IsOpen( row ) : 0;
+}
 
+int FileBox::TreeToggled( void *user, int row )
+{
+    FileBox *box = (FileBox *)user;
+
+    if ( !box ) return 0;
+    if ( box->tree.IsOpen( row ) ) return box->tree.Close( row );
+    return box->OpenNode( row );
+}
+
+void FileBox::TreeName( void *user, int row, char *buf, int buflen )
+{
+    FileBox *box = (FileBox *)user;
+
+    if ( buflen < 1 ) return;
     buf[0] = '\0';
-    if ( !fb || buflen < 8 ) return;
-
-    /* Column 0 is left blank for the list's own mark glyph - that is the
-     * widget's rule, not ours. */
-    if ( fb->scan.Kind( index ) == DS_FILE )
-    {
-        sprintf( size, "%lu", fb->scan.Size( index ) );
-        fb->scan.Date( index, date, sizeof( date ) );
-        sprintf( buf, " %-14.14s %10.10s  %-16.16s",
-                 fb->scan.Disp( index ), size, date );
-    }
-    else
-        sprintf( buf, " %-14.14s", fb->scan.Disp( index ) );
-
+    if ( !box ) return;
+    strncpy( buf, box->tree.Name( row ), (size_t)buflen - 1 );
     buf[buflen - 1] = '\0';
 }
 
-void FileBox::RowChosen( void *user, int index )
+/* The columns to the right of the name.  A folder tree has none. */
+void FileBox::TreeTail( void *user, int row, char *buf, int buflen )
 {
-    FileBox *fb = (FileBox *)user;
-    if ( fb ) fb->pending = index;      // acted on after HandleEvent returns
+    (void)user; (void)row;
+    if ( buflen > 0 ) buf[0] = '\0';
 }
 
-void FileBox::Refill( void )
+int FileBox::TreeIconOf( void *user, int row )
 {
-    scan.Rescan();
-    strncpy( curPath, scan.Path(), sizeof( curPath ) - 1 );
-    curPath[sizeof( curPath ) - 1] = '\0';
+    FileBox *box = (FileBox *)user;
 
-    list.SetData( scan.Count(), RowText, this );
-    list.SetActivate( RowChosen );
-    list.SetDblClick( RowChosen );
-    list.SelectFirst();
+    if ( !box ) return DF_ICON_NONE;
+    return box->tree.IsDrive( row ) ? box->iconDrive : box->iconFolder;
 }
 
-/*---- Accepting ------------------------------------------------------------ */
-
-void FileBox::Accept( int row )
+void FileBox::TreeTwice( void *user, int row )
 {
-    if ( row < 0 || row >= scan.Count() ) return;
+    FileBox *box = (FileBox *)user;
+    if ( box ) box->pendingNode = row;  // acted on after HandleEvent returns
+}
 
-    /* A directory-like row is a MOVE, not a choice - in every mode.  Even a
-     * folder picker has to be able to walk into a folder before choosing it,
-     * which is why OK on a folder opens it and OK on nothing chooses where
-     * you are. */
-    if ( scan.IsDir( row ) )
+/* Name, size and the day it was written.  Column 0 is left blank for the
+ * list's own mark glyph or icon - that is the widget's rule, not ours. */
+void FileBox::FileText( void *user, int row, char *buf, int buflen )
+{
+    FileBox *box = (FileBox *)user;
+    char     size[16];
+    char     date[20];
+
+    if ( buflen < 1 ) return;
+    buf[0] = '\0';
+    if ( !box || buflen < 40 ) return;
+
+    sprintf( size, "%lu", box->files.Size( row ) );
+    box->files.Date( row, date, sizeof( date ) );
+    sprintf( buf, " %-12.12s %10.10s  %-10.10s",
+             box->files.Name( row ), size, date );
+}
+
+int FileBox::FileIconOf( void *user, int row )
+{
+    FileBox *box = (FileBox *)user;
+
+    (void)row;
+    return box ? box->iconFile : DF_ICON_NONE;
+}
+
+void FileBox::FileTwice( void *user, int row )
+{
+    FileBox *box = (FileBox *)user;
+    if ( box ) box->pendingFile = row;
+}
+
+/* Nothing here can be marked: one thing is being chosen, and it is the one
+ * under the highlight. */
+int FileBox::NoMark( void *user, int row )
+{
+    (void)user; (void)row;
+    return 0;
+}
+
+/*---- Reading the disk, and what to do when it will not be read ------------ *
+ * Each of these makes the call, and if a critical error was the reason it
+ * failed says so and offers to make it again.  Show() holds the guard that
+ * makes sure there is a handler to report one.
+ *---------------------------------------------------------------------------*/
+int FileBox::RevealPath( const char *path )
+{
+    int row;
+
+    for ( ;; )
     {
-        scan.Enter( row );
-        Refill();
+        DfCritClear();
+        row = tree.Reveal( path );
+        if ( !DfCritHit() ) break;
+        asked = 1;
+        if ( !DfCritAsk( mouse ) ) break;
+    }
+    return row;
+}
+
+int FileBox::OpenNode( int row )
+{
+    int rows;
+
+    for ( ;; )
+    {
+        DfCritClear();
+        rows = tree.Open( row );
+        if ( !DfCritHit() ) break;
+        asked = 1;
+        if ( !DfCritAsk( mouse ) ) break;
+    }
+    return rows;
+}
+
+/* The files of the folder the highlight is on.  NOT of a drive that has
+ * not been opened: passing the highlight over A: must not spin it up, let
+ * alone put a box on the screen about it. */
+void FileBox::RefillFiles( void )
+{
+    int row = treeList.Selected();
+
+    fileSel = -1;
+    if ( !HasFiles() ) return;
+
+    if ( !treePath[0] || ( tree.IsDrive( row ) && !tree.IsOpen( row ) ) )
+    {
+        files.Empty();
+    }
+    else
+    {
+        for ( ;; )
         {
-            MouseHide guard( mouse );
-            DrawPathRow();
-            list.Draw();
+            DfCritClear();
+            files.ScanPath( treePath );
+            if ( !DfCritHit() ) break;
+            asked = 1;
+            if ( !DfCritAsk( mouse ) ) { files.Empty(); break; }
         }
-        return;
     }
 
-    if ( mode == FB_DIR ) return;       // files are not choosable here
-
-    scan.FullName( row, result, sizeof( result ) );
-    if ( mode == FB_SAVE )
-    {
-        strncpy( name, scan.Name( row ), sizeof( name ) - 1 );
-        name[sizeof( name ) - 1] = '\0';
-        nameLen = (int)strlen( name );
-        nameCur = nameLen;
-        {
-            MouseHide guard( mouse );
-            DrawNameRow();
-        }
-        return;                         // picked, not yet accepted: OK does that
-    }
-    done = 1;
+    fileList.SetData( files.Count(), FileText, this );
+    fileList.SetMarkable( NoMark );
+    fileList.SetDblClick( FileTwice );
+    fileList.SetIconProvider( ( iconFile >= 0 ) ? FileIconOf : 0 );
+    fileList.SelectFirst();
 }
 
-void FileBox::AcceptName( void )
+/* Does 'path' exist, and is it a folder?  The root of a drive is taken to
+ * be one without looking - looking is a read, and whoever goes there next
+ * will do the reading and the asking. */
+int FileBox::Look( const char *path, int *isFolder )
 {
-    const char *dir = scan.Path();
-    int         n;
+    char     bare[FB_PATHLEN];
+    unsigned attr = 0;
+    int      len, found;
 
-    if ( nameLen < 1 ) return;
-    name[nameLen] = '\0';
+    *isFolder = 0;
+    strncpy( bare, path, sizeof( bare ) - 1 );
+    bare[sizeof( bare ) - 1] = '\0';
+    len = (int)strlen( bare );
+    while ( len > 0 && IsSep( bare[len-1] ) ) bare[--len] = '\0';
 
-    /* A name with a drive or a separator in it is a path already and is
-     * taken as typed; anything else is relative to the directory on screen. */
-    if ( name[1] == ':' || name[0] == '\\' || name[0] == '/' )
+    if ( len == 0 || ( len == 2 && bare[1] == ':' ) )
     {
-        strncpy( result, name, sizeof( result ) - 1 );
-        result[sizeof( result ) - 1] = '\0';
+        *isFolder = 1;
+        return 1;
+    }
+
+    for ( ;; )
+    {
+        DfCritClear();
+        found = ( _dos_getfileattr( bare, &attr ) == 0 ) ? 1 : 0;
+        if ( !DfCritHit() ) break;
+        asked = 1;
+        if ( !DfCritAsk( mouse ) ) { found = 0; break; }
+    }
+
+    if ( !found ) return 0;
+    *isFolder = ( attr & _A_SUBDIR ) ? 1 : 0;
+    return 1;
+}
+
+void FileBox::Fill( void )
+{
+    char full[FB_PATHLEN];
+    int  row;
+    int  nameWidth = treeBox.end_column - treeBox.column - 2;
+
+    treeList.SetData( tree.Build(), TreeTail, this );
+    treeList.SetTreeProvider( TreeDepthOf, TreeHasKids, TreeIsOpen, TreeToggled,
+                              TreeName, nameWidth );
+    treeList.SetMarkable( NoMark );
+    treeList.SetDblClick( TreeTwice );
+    treeList.SetIconProvider( ( iconDrive >= 0 || iconFolder >= 0 )
+                              ? TreeIconOf : 0 );
+
+    row = RevealPath( startPath[0] ? startPath : "." );
+    treeList.SetCount( tree.Count() );
+    if ( row < 0 ) row = 0;
+    treeList.Select( row );
+
+    tree.FullPath( row, treePath, sizeof( treePath ) );
+    driveOpen = tree.IsDrive( row ) ? tree.IsOpen( row ) : 1;
+    RefillFiles();
+
+    if ( mode == FB_DIR )
+    {
+        /* The field says what the caller asked for, in full.  Where the
+         * tree got all the way there the two are the same path and the
+         * tree's spelling of it is used, which is the one DOS gave us. */
+        full[0] = '\0';
+        if ( startPath[0] && !_fullpath( full, startPath, sizeof( full ) ) )
+        {
+            strcpy( full, startPath );
+        }
+        if ( !full[0] || stricmp( full, treePath ) == 0 ) strcpy( full, treePath );
+        field.SetText( full );
+    }
+    else
+    {
+        ComposeField();
+    }
+
+    /* The keyboard starts where the choosing will be done: among the files
+     * when one is being opened, in the field when one is being named, and
+     * in the tree when it is a folder that is wanted. */
+    focus    = FB_AT_TREE;
+    lastList = FB_AT_TREE;
+    if ( mode == FB_SAVE ) focus = FB_AT_FIELD;
+    if ( mode == FB_OPEN && HasFiles() && fileList.Count() > 0 )
+    {
+        focus    = FB_AT_FILES;
+        lastList = FB_AT_FILES;
+        SyncFromFiles( TRUE );
+    }
+    field.SetFocus( (boolean)( ( focus == FB_AT_FIELD ) ? TRUE : FALSE ) );
+}
+
+/* A list has a solid bar while the keyboard is in it and coloured text
+ * while it is not: the row is still marked, and it is plain which of the
+ * two the arrows will move. */
+void FileBox::PaintFocus( void )
+{
+    if ( focus == FB_AT_TREE ) treeList.SetSelHighlight( FG_BLACK, BG_CYAN );
+    else                       treeList.SetSelHighlight( FG_BLUE,  BG_WHITE );
+
+    if ( focus == FB_AT_FILES ) fileList.SetSelHighlight( FG_BLACK, BG_CYAN );
+    else                        fileList.SetSelHighlight( FG_BLUE,  BG_WHITE );
+
+    MouseHide guard( mouse );
+    treeList.Draw();
+    if ( HasFiles() ) fileList.Draw();
+    field.Draw();
+}
+
+void FileBox::Paint( void )
+{
+    char shown[128];
+    int  room = boxW - 6;
+
+    MouseHide guard( mouse );
+
+    if ( prompt[0] && room > 0 )
+    {
+        if ( room > (int)sizeof( shown ) - 1 ) room = (int)sizeof( shown ) - 1;
+        strncpy( shown, prompt, (size_t)room );
+        shown[room] = '\0';
+        DfTextOut( (short)( coordinates.row + 2 ), (short)( coordinates.column + 4 ),
+                   shown, fg_color, bg_color );
+    }
+
+    DfTextOut( (short)( coordinates.end_row - 2 ), (short)( coordinates.column + 4 ),
+               FieldLabel(), fg_color, bg_color );
+    PaintFocus();
+    btnOk.Draw();
+    btnCancel.Draw();
+}
+
+/*---- Who has the keyboard ------------------------------------------------- */
+
+void FileBox::SetFocusTo( int where )
+{
+    if ( where == FB_AT_FILES && ( !HasFiles() || fileList.Count() < 1 ) )
+    {
+        where = FB_AT_TREE;
+    }
+    if ( where == focus ) return;
+
+    focus = where;
+    if ( where != FB_AT_FIELD ) lastList = where;
+    field.SetFocus( (boolean)( ( where == FB_AT_FIELD ) ? TRUE : FALSE ) );
+
+    /* Arriving among the files picks the one under the highlight, so that
+     * what Enter would take is what the bar is on. */
+    if ( where == FB_AT_FILES ) SyncFromFiles( TRUE );
+    PaintFocus();
+}
+
+/* What the field says once the tree has moved: the folder, the folder ready
+ * to have a name typed after it, or the folder and the name being saved. */
+void FileBox::ComposeField( void )
+{
+    char text[FB_PATHLEN];
+
+    if ( mode == FB_DIR )       strcpy( text, treePath );
+    else if ( mode == FB_OPEN ) JoinPath( text, sizeof( text ), treePath, "" );
+    else                        JoinPath( text, sizeof( text ), treePath, name );
+    field.SetText( text );
+}
+
+/* FB_SAVE: a name typed into the field goes along when the folder changes.
+ * Whatever follows the last separator is the name, unless the whole field
+ * is just the folder we are leaving. */
+void FileBox::KeepTypedName( void )
+{
+    const char *text = field.Text();
+    const char *leaf = text;
+    const char *at;
+
+    if ( !text[0] || stricmp( text, treePath ) == 0 ) return;
+
+    for ( at = text; *at; ++at )
+    {
+        if ( IsSep( *at ) || *at == ':' ) leaf = at + 1;
+    }
+    if ( !leaf[0] ) return;
+
+    strncpy( name, leaf, sizeof( name ) - 1 );
+    name[sizeof( name ) - 1] = '\0';
+}
+
+/* The highlight is on a different folder from the one the field was last
+ * filled from: say so in the field, and list that folder's files.  Opening
+ * or shutting a node moves nothing, so it leaves alone whatever has been
+ * typed - except that opening a DRIVE is what lets its files be read. */
+void FileBox::SyncFromTree( boolean force )
+{
+    char now[FB_PATHLEN];
+    int  row  = treeList.Selected();
+    int  open = tree.IsDrive( row ) ? tree.IsOpen( row ) : 1;
+    int  moved;
+
+    tree.FullPath( row, now, sizeof( now ) );
+    if ( !now[0] ) return;
+
+    moved = ( force || strcmp( now, treePath ) != 0 ) ? 1 : 0;
+    if ( !moved && open == driveOpen ) return;
+
+    if ( moved && mode == FB_SAVE ) KeepTypedName();
+
+    strcpy( treePath, now );
+    driveOpen = open;
+
+    if ( HasFiles() )
+    {
+        RefillFiles();
+        fileList.Draw();
+    }
+    if ( moved )
+    {
+        ComposeField();
+        field.Draw();
+    }
+}
+
+void FileBox::SyncFromFiles( boolean force )
+{
+    char text[FB_PATHLEN];
+    int  row = fileList.Selected();
+
+    if ( mode == FB_DIR ) return;       // there to be looked at, no more
+    if ( fileList.Count() < 1 ) return;
+    if ( !force && row == fileSel ) return;
+
+    fileSel = row;
+    strncpy( name, files.Name( row ), sizeof( name ) - 1 );
+    name[sizeof( name ) - 1] = '\0';
+
+    JoinPath( text, sizeof( text ), treePath, name );
+    field.SetText( text );
+    field.Draw();
+}
+
+/* Take the tree to a folder that was typed. */
+void FileBox::GoTo( const char *path )
+{
+    int row = RevealPath( path );
+
+    treeList.SetCount( tree.Count() );
+    if ( row >= 0 ) treeList.Select( row );
+
+    field.SetText( "" );        // it named the folder, not a file to keep
+    SyncFromTree( TRUE );
+
+    MouseHide guard( mouse );
+    treeList.Draw();
+}
+
+void FileBox::Accept( void )
+{
+    char text[FB_PATHLEN];
+    char full[FB_PATHLEN];
+    int  isFolder = 0, there, len;
+
+    TidyPath( text, sizeof( text ), field.Text() );
+    if ( !text[0] ) return;             // an empty field is not an answer
+
+    if ( mode == FB_DIR )
+    {
+        strcpy( result, text );
         done = 1;
         return;
     }
 
-    if ( scan.IsDriveList() ) return;   // no directory to put it in
+    /* A name on its own belongs to the folder on show. */
+    if ( text[1] == ':' || IsSep( text[0] ) ) strcpy( full, text );
+    else JoinPath( full, sizeof( full ), treePath, text );
 
-    strncpy( result, dir, sizeof( result ) - 2 );
-    result[sizeof( result ) - 2] = '\0';
-    n = (int)strlen( result );
-    if ( n > 0 && result[n-1] != '\\' && result[n-1] != '/' ) result[n++] = '\\';
-    result[n] = '\0';
-    strncat( result, name, sizeof( result ) - 1 - n );
+    there = Look( full, &isFolder );
+    if ( there && isFolder )
+    {
+        GoTo( full );
+        return;
+    }
+
+    len = (int)strlen( full );
+    if ( len < 1 || IsSep( full[len-1] ) ) return;      // a folder, not there
+    if ( mode == FB_OPEN && !there ) return;            // nothing to open
+
+    strcpy( result, full );
     done = 1;
 }
 
-void FileBox::AcceptDir( void )
+void FileBox::RunPending( void )
 {
-    if ( scan.IsDriveList() ) return;   // "Drives" is not a folder
-    strncpy( result, scan.Path(), sizeof( result ) - 1 );
-    result[sizeof( result ) - 1] = '\0';
-    done = 1;
+    if ( pendingNode >= 0 )
+    {
+        int row = pendingNode;
+
+        pendingNode = -1;
+        treeList.ToggleNode( row );
+        SyncFromTree( FALSE );
+    }
+
+    if ( pendingFile >= 0 )
+    {
+        pendingFile = -1;
+        if ( mode != FB_DIR )
+        {
+            SyncFromFiles( TRUE );
+            Accept();
+        }
+    }
 }
 
-void FileBox::NameInsert( char c )
+/* One key, as an Event spells it: ASCII, or 0x100 | scan code. */
+void FileBox::Key( int key )
 {
-    int i;
+    Event ev;
+    int   canFiles = ( HasFiles() && fileList.Count() > 0 ) ? 1 : 0;
 
-    if ( nameLen >= (int)sizeof( name ) - 1 ) return;
-    for ( i = nameLen; i > nameCur; --i ) name[i] = name[i-1];
-    name[nameCur] = c;
-    ++nameLen; ++nameCur;
-    name[nameLen] = '\0';
+    ev.kind    = Event::EV_KEY;
+    ev.key     = key;
+    ev.x = ev.y = 0;
+    ev.buttons = 0;
+
+    switch ( key )
+    {
+    case KEY_ESC:   done = -1;  return;
+    case KEY_ENTER: Accept();   return;
+
+    case 9:
+        if ( focus == FB_AT_TREE )       SetFocusTo( canFiles ? FB_AT_FILES : FB_AT_FIELD );
+        else if ( focus == FB_AT_FILES ) SetFocusTo( FB_AT_FIELD );
+        else                             SetFocusTo( FB_AT_TREE );
+        return;
+
+    case ( 0x100 | _KB_BACK_TAB ):
+        if ( focus == FB_AT_TREE )       SetFocusTo( FB_AT_FIELD );
+        else if ( focus == FB_AT_FILES ) SetFocusTo( FB_AT_TREE );
+        else                             SetFocusTo( canFiles ? FB_AT_FILES : FB_AT_TREE );
+        return;
+
+    /* These mean nothing to a one-line field, so from there they go to the
+     * list that had the keyboard last - and take it back. */
+    case KEY_UP:
+    case KEY_DOWN:
+    case ( 0x100 | _KB_PGUP ):
+    case ( 0x100 | _KB_PGDN ):
+        if ( focus == FB_AT_FIELD ) SetFocusTo( lastList );
+        if ( focus == FB_AT_FILES )
+        {
+            fileList.HandleEvent( ev );
+            SyncFromFiles( FALSE );
+        }
+        else
+        {
+            treeList.HandleEvent( ev );
+            SyncFromTree( FALSE );
+        }
+        return;
+
+    default:
+        break;
+    }
+
+    if ( focus == FB_AT_FIELD )
+    {
+        field.HandleEvent( ev );
+        return;
+    }
+
+    if ( focus == FB_AT_TREE )
+    {
+        switch ( key )
+        {
+        case KEY_LEFT:
+        case KEY_RIGHT:
+        case ( 0x100 | _KB_HOME ):
+        case ( 0x100 | _KB_END ):
+        case '+':
+        case '-':
+            treeList.HandleEvent( ev );
+            SyncFromTree( FALSE );
+            return;
+
+        default:
+            break;
+        }
+    }
+    else
+    {
+        switch ( key )
+        {
+        case ( 0x100 | _KB_HOME ):
+        case ( 0x100 | _KB_END ):
+            fileList.HandleEvent( ev );
+            SyncFromFiles( FALSE );
+            return;
+
+        case KEY_LEFT:  SetFocusTo( FB_AT_TREE );  return;
+        case KEY_RIGHT: return;
+
+        default:
+            break;
+        }
+    }
+
+    /* Anything a field can use is typing, and typing belongs in the field:
+     * walk to a folder, type "\NEW", and the keyboard has followed. */
+    if ( key == 8 || key == ( 0x100 | _KB_DEL ) || ( key >= 32 && key <= 126 ) )
+    {
+        SetFocusTo( FB_AT_FIELD );
+        field.HandleEvent( ev );
+    }
 }
 
-void FileBox::NameDelete( int at )
+static int Inside( const coordinates_t &box, short x, short y )
 {
-    int i;
+    return ( y >= box.row && y <= box.end_row &&
+             x >= box.column && x <= box.end_column );
+}
 
-    if ( at < 0 || at >= nameLen ) return;
-    for ( i = at; i < nameLen - 1; ++i ) name[i] = name[i+1];
-    --nameLen;
-    name[nameLen] = '\0';
+void FileBox::Click( short x, short y, int buttons )
+{
+    Event ev;
+
+    if ( btnCancel.HitTest( x, y ) ) { done = -1; return; }
+    if ( btnOk.HitTest( x, y ) )     { Accept();  return; }
+
+    ev.kind    = Event::EV_MOUSE;
+    ev.key     = 0;
+    ev.x       = x;
+    ev.y       = y;
+    ev.buttons = buttons;
+
+    if ( field.HitTest( x, y ) )
+    {
+        SetFocusTo( FB_AT_FIELD );
+        field.HandleEvent( ev );
+        return;
+    }
+
+    if ( Inside( treeBox, x, y ) )
+    {
+        SetFocusTo( FB_AT_TREE );
+        treeList.HandleEvent( ev );
+        SyncFromTree( FALSE );
+        return;
+    }
+
+    if ( HasFiles() && Inside( fileBox, x, y ) )
+    {
+        SetFocusTo( FB_AT_FILES );
+        fileList.HandleEvent( ev );
+        SyncFromFiles( FALSE );
+    }
 }
 
 /*---- Showing it ----------------------------------------------------------- */
 
 void FileBox::TestOpen( void )
 {
+    result[0]   = '\0';
+    done        = 0;
+    pendingNode = -1;
+    pendingFile = -1;
+
     Place();
-    Draw();
     LayOut();
-    if ( startDir[0] ) chdir( startDir );
-    Refill();
+    Fill();
 
     MouseHide guard( mouse );
-    DrawPathRow();
-    list.Draw();
-    DrawNameRow();
-    btnOk.Draw();
-    btnCancel.Draw();
+    Draw();
+    Paint();
+}
+
+void FileBox::TestKey( int key )
+{
+    Key( key );
+    RunPending();
+}
+
+void FileBox::TestClick( short x, short y )
+{
+    Click( x, y, LEFT_BUTTON );
+    RunPending();
 }
 
 boolean FileBox::Show( void )
 {
-    char     backDir[FB_PATHLEN];
-    unsigned backDrive = 0, n;
-    int      lastB;
+    int lastB;
 
     if ( !IsTextMode() ) return FALSE;
 
-    /* Where we were, so we can put it back.  Both halves: the drive is not
-     * part of getcwd's answer on the drive we end up on. */
-    _dos_getdrive( &backDrive );
-    if ( !getcwd( backDir, sizeof( backDir ) ) ) backDir[0] = '\0';
+    /* Ours for as long as the box is up, if the program has none. */
+    DfCritGuard critical;
 
-    result[0] = '\0';
-    done      = 0;
-    pending   = -1;
+    result[0]   = '\0';
+    done        = 0;
+    pendingNode = -1;
+    pendingFile = -1;
 
+    /* The disk is read BEFORE anything is painted, so the box arrives whole
+     * rather than as an empty frame waiting on a drive. */
     Place();
-    Draw();
     LayOut();
-
-    if ( startDir[0] )
-    {
-        if ( startDir[1] == ':' )
-            _dos_setdrive( (unsigned)( toupper( (unsigned char)startDir[0] ) - 'A' + 1 ), &n );
-        chdir( startDir );
-    }
-    Refill();
+    Fill();
 
     {
         MouseHide guard( mouse );
-        DrawPathRow();
-        list.Draw();
-        DrawNameRow();
-        btnOk.Draw();
-        btnCancel.Draw();
+        Draw();
+        Paint();
     }
 
     /* Headless harness: it has nobody to type, so it looks and leaves. */
@@ -401,119 +929,49 @@ boolean FileBox::Show( void )
     /* Seed the edge detector from the LIVE button state - the click that
      * opened this is usually still held. */
     lastB = ( mouse && mouse->IsInited() ) ? mouse->Status() : 0;
+    asked = 0;
 
     while ( !done )
     {
-        Event ev;
-
         if ( kbhit() )
         {
-            int k = getch();
+            int key = getch();
 
-            if ( k == 27 ) { done = -1; break; }
-            if ( k == 0 || k == 0xE0 )
+            if ( key == 0 || key == 0xE0 )
             {
-                int ext = getch();
-
-                /* The name field takes the editing keys in FB_SAVE; the list
-                 * takes the movement keys in every mode. */
-                if ( mode == FB_SAVE &&
-                     ( ext == _KB_LEFT || ext == _KB_RIGHT || ext == _KB_DEL ) )
-                {
-                    if ( ext == _KB_LEFT  && nameCur > 0 )       --nameCur;
-                    if ( ext == _KB_RIGHT && nameCur < nameLen ) ++nameCur;
-                    if ( ext == _KB_DEL )                        NameDelete( nameCur );
-                    MouseHide guard( mouse );
-                    DrawNameRow();
-                    continue;
-                }
-
-                ev.kind = Event::EV_KEY;
-                ev.key  = 0x100 | ext;
-                ev.x = ev.y = 0;
-                ev.buttons = 0;
-                list.HandleEvent( ev );
-                continue;
+                /* The second half of an extended key, asked for only if it
+                 * is there: getch() blocks, and a lone first half - a TSR
+                 * can leave one - would stop the box dead and then eat the
+                 * next key pressed.  See App::PollEvent. */
+                if ( !kbhit() ) continue;
+                key = 0x100 | ( getch() & 0xFF );
             }
+            Key( key );
+            RunPending();
+        }
+        else if ( mouse && mouse->IsInited() )
+        {
+            int now = mouse->Status();
 
-            if ( k == 13 )
+            if ( ( now & LEFT_BUTTON ) && !( lastB & LEFT_BUTTON ) )
             {
-                /* Enter means the list's current row - which may be a move
-                 * rather than a choice - except in FB_SAVE with something
-                 * typed, where it means the field. */
-                if ( mode == FB_SAVE && nameLen > 0 &&
-                     !scan.IsDir( list.Selected() ) )
-                    AcceptName();
-                else
-                    Accept( list.Selected() );
-                continue;
+                Click( DfMouseCol( mouse->X() ), DfMouseRow( mouse->Y() ), now );
+                RunPending();
             }
-
-            if ( mode == FB_SAVE )
-            {
-                if ( k == 8 )
-                {
-                    if ( nameCur > 0 ) { NameDelete( nameCur - 1 ); --nameCur; }
-                    MouseHide guard( mouse );
-                    DrawNameRow();
-                    continue;
-                }
-                if ( k >= 32 && k < 127 )
-                {
-                    NameInsert( (char)k );
-                    MouseHide guard( mouse );
-                    DrawNameRow();
-                    continue;
-                }
-            }
-            continue;
+            lastB = now;
         }
 
-        if ( mouse && mouse->IsInited() )
+        /* A box of our own - "No disk in drive" - ran its own mouse loop on
+         * top of this one, and the button that answered it may still be
+         * down.  Start again from how things are. */
+        if ( asked )
         {
-            int b = mouse->Status();
-            if ( ( b & LEFT_BUTTON ) && !( lastB & LEFT_BUTTON ) )
-            {
-                short mx = DfMouseCol( mouse->X() );
-                short my = DfMouseRow( mouse->Y() );
-
-                if ( btnCancel.HitTest( mx, my ) ) { done = -1; lastB = b; break; }
-                if ( btnOk.HitTest( mx, my ) )
-                {
-                    if ( mode == FB_DIR )            AcceptDir();
-                    else if ( mode == FB_SAVE && nameLen > 0 ) AcceptName();
-                    else                             Accept( list.Selected() );
-                    lastB = b;
-                    continue;
-                }
-
-                ev.kind    = Event::EV_MOUSE;
-                ev.key     = 0;
-                ev.x       = mx;
-                ev.y       = my;
-                ev.buttons = b;
-                list.HandleEvent( ev );
-            }
-            lastB = b;
-        }
-
-        /* A row the list handed back through its activate/double-click
-         * callback.  Acted on HERE rather than inside the callback, because
-         * acting on it rescans and redraws the very list that is mid-event. */
-        if ( pending >= 0 )
-        {
-            int row = pending;
-            pending = -1;
-            Accept( row );
+            asked = 0;
+            lastB = ( mouse && mouse->IsInited() ) ? mouse->Status() : 0;
         }
     }
 
     RestoreWindow();
-
-    /* Put the process back where it was standing. */
-    if ( backDrive ) _dos_setdrive( backDrive, &n );
-    if ( backDir[0] ) chdir( backDir );
-
     DfModalFinished();          /* see DOSFORMS.HPP */
     return (boolean)( ( done == 1 && result[0] ) ? TRUE : FALSE );
 }

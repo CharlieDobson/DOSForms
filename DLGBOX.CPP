@@ -19,6 +19,7 @@ DlgBox::DlgBox( const foreground_color_t foreground, const background_color_t ba
     : Popup( foreground, background )
 {
     text_justification = CENTER;
+    align_block = FALSE;
     message[0] = '\0';
     buttons = DB_OK;
     custom_count = 0;
@@ -28,6 +29,7 @@ DlgBox::DlgBox( const foreground_color_t foreground, const background_color_t ba
     : Popup( foreground, background )
 {
     text_justification = CENTER;
+    align_block = FALSE;
 
     this->message[0] = '\0';
     if ( message && message[0] != '\0' ) {
@@ -43,6 +45,7 @@ DlgBox::DlgBox( const foreground_color_t foreground, const background_color_t ba
     : Popup( foreground, background )
 {
     text_justification = CENTER;
+    align_block = FALSE;
     message[0] = '\0';
 
     this->buttons = DB_OK;
@@ -56,6 +59,7 @@ DlgBox::DlgBox( const foreground_color_t foreground, const background_color_t ba
     : Popup( foreground, background )
 {
     text_justification = CENTER;
+    align_block = FALSE;
 
     this->message[0] = '\0';
     if ( message && message[0] != '\0' ) {
@@ -223,7 +227,10 @@ void DlgBox::Draw( void )
     if ( start_row < inner_top ) start_row = inner_top;
 
     for ( i = 0; i < dlg_lines; i++ ) {
-        short len = (short)strlen( dlg_line[i] );
+        // As a block, every line is placed as if it were as long as the
+        // longest: they share a left edge, and the justification says where
+        // the block goes rather than where each line does.
+        short len = align_block ? dlg_widest : (short)strlen( dlg_line[i] );
         short col;
 
         switch ( text_justification ) {
@@ -465,8 +472,17 @@ int DlgBox::ShowEx( void )
             int key = getch();
             int upper_key = toupper( key );
 
+            // An arrow or a function key is TWO bytes, and the second is a
+            // scan code that reads as a letter: Ins is 'R', End is 'O', Up is
+            // 'H'.  Left in the buffer it was taken as the next key typed,
+            // so Ins pressed a Retry button.  Take it out, if it is there
+            // (getch() would wait for it - see App::PollEvent), and do
+            // nothing with the pair.
+            if ( key == 0 || key == 0xE0 ) {
+                if ( kbhit() ) getch();
+            }
             // Enter always selects the first button
-            if ( key == '\r' || key == '\n' ) {
+            else if ( key == '\r' || key == '\n' ) {
                 result = 0;
                 done = 1;
             }

@@ -58,7 +58,9 @@ WHAT IS IN IT
                   markers into a name field it owns at the left, so the
                   columns to the right of the name stay put whatever depth
                   a row is at.  '+' and '-' then expand and collapse
-                  rather than marking everything.
+                  rather than marking everything.  On a screen that draws
+                  icons a tree row's icon goes beside its NAME, after the
+                  marker, not in the mark column.
       FIELDPAN    a panel of label / value rows with the value column lined
                   up, plus headings, blanks and rules.  The shape of every
                   "here is what this machine has" page, which was being
@@ -70,6 +72,11 @@ WHAT IS IN IT
       CHECKBOX    CheckBox and RadioGroup.  Mouse anywhere on the row, a
                   hotkey letter, and (for a radio group that has been
                   clicked on) the arrow keys.
+      TEXTFLD     TextField: one line of editable text as a control, for a
+                  dialog that has other things in it as well.  It takes keys
+                  only while it has the focus, and the dialog says when that
+                  is.  THE ONLY FIELD IN THE TOOLKIT: InputBox's and
+                  FileBox's are this one.
 
     Boxes that take over
 
@@ -80,20 +87,76 @@ WHAT IS IN IT
                   yourself (SetButtons + ShowEx, which answers with an
                   index).  Sizes itself around the text unless you give it
                   a rectangle.  DlgBox::Message is the one-call version.
+                  align_block keeps the lines' left edges together, for a
+                  message that is a table.
       INPUTBOX    one line of text, properly editable - Left/Right/Home/End,
                   insert, Del, a sideways scroll, and an optional mask for
                   passwords.
       TEXTVIEW    a read-only viewer over a file or a string, with Find.
-      FILEBOX     choose a file, choose a folder, or name a file to save.
+      FILEBOX     choose a file, name a file to save, or choose a folder:
+                  a TREE of the drives and folders, a LIST of the files in
+                  the folder the tree is on, and a FIELD with the path in
+                  it that can be typed in - so a folder that does not exist
+                  yet is named by walking to where it goes and adding to
+                  the end.  Enter accepts the field.  The file list is on
+                  for a file and off for a folder, and ShowFiles says
+                  otherwise.  XArchive's extract dialog is one, with the
+                  list off.
       PROGBOX     ProgressBox (a bar and a way out) and WaitBox (one line,
                   for work that cannot say how far along it is).
 
-    The model behind the chooser
+    The models behind the chooser
 
       DIRSCAN     a directory as a list of rows - drives, the way up,
-                  subdirectories, files - with a wildcard filter.  FileBox
-                  sits on one; so does a program whose own main window is a
-                  browser, which is how XArchive uses it.
+                  subdirectories, files - with a wildcard filter.  Two ways
+                  to use one.  Rescan / Enter / Up MOVE the process about
+                  the disk and list where it is standing, which is how a
+                  program whose own main window is a browser uses it
+                  (XArchive).  ScanPath lists a directory by NAME and moves
+                  nothing, which is how FileBox fills its file list.
+      DIRTREE     the drives and folders as a tree of rows, in the shape
+                  ListBox's tree mode asks for.  Nothing is read until it
+                  is opened, and the current directory is never moved.
+                  FileBox's tree is one.
+
+    When the disk is not there
+
+      CRITERR     INT 24h.  DfCritGuard, constructed once in main, takes
+                  critical errors away from DOS - whose "Abort, Retry,
+                  Fail?" is written across whatever the program has on the
+                  screen - and DfCritAsk puts up a box instead: "No disk in
+                  drive A:", Retry or Cancel.  THE HANDLER DOES NOT DRAW
+                  THE BOX.  It runs inside DOS, which cannot be entered
+                  twice, so nothing that allocates may be called (the
+                  stack is the program's own); it notes the error
+                  and fails the call, and the code that made the call asks
+                  afterwards and makes it again.  See CRITERR.HPP for the
+                  four-line loop.  FileBox does this for itself; a program
+                  does it round its own disk calls.
+
+                  GUARDS NEST, and only the outermost installs the handler
+                  and puts the old vector back.  FileBox holds one while it
+                  is up, so its tree asks Retry / Cancel even in a program
+                  with no guard in main - and that program has DOS's
+                  prompt again the moment the box is gone.
+
+                  A CALL THAT MET A CRITICAL ERROR HAS FAILED, WHATEVER IT
+                  RETURNED.  DOS told to fail a read does not always pass
+                  the failure on: a search of a directory it could not
+                  read comes back "found", with names made of what was in
+                  the buffer, and the free space of a disk whose FAT it
+                  could not read comes back as the whole disk.  Look at
+                  DfCritHit() before the return code.  DfFindFirst and
+                  DfFindNext are the two search calls with that done, and
+                  DirScan and DirTree use them.  Retry tells DOS to forget
+                  its buffers first (a disk reset), or it would not read
+                  again at all.
+
+                  THE HANDLER FOLLOWS NO FAR POINTER.  Watcom's
+                  _hardresume finds its way back through DS, and a
+                  large-model compiler points DS elsewhere to follow one.
+                  The handler keeps what DOS passed; what it means is
+                  worked out afterwards.
 
 
 WHAT LINKS AGAINST WHAT
@@ -104,10 +167,16 @@ WHAT LINKS AGAINST WHAT
       everything          needs DOSFORMS.CPP
       any widget          needs MOUSHIDE.CPP (and MSMOUSE.CPP if -dUSE_MOUSE)
       DLGBOX              needs POPUP + BUTTON
-      INPUTBOX            needs POPUP + BUTTON
+      INPUTBOX            needs POPUP + BUTTON + TEXTFLD
       TEXTVIEW            needs POPUP + BUTTON + INPUTBOX  (Find asks for a
                           string, and asking for a string is an InputBox)
-      FILEBOX             needs POPUP + BUTTON + LISTBOX + DIRSCAN
+      FILEBOX             needs POPUP + BUTTON + LISTBOX + TEXTFLD +
+                          DIRTREE + DIRSCAN + CRITERR + DLGBOX
+      CRITERR             needs DLGBOX  (the box it asks with)
+      DIRSCAN             needs CRITERR  (its searches are DfFindFirst's)
+      DIRTREE             needs DIRSCAN  (the drive probe is DirScan's)
+                          + CRITERR
+      TEXTFLD             nothing but the base
       PROGBOX             needs POPUP + BUTTON
       APP                 needs DESKTOP
       FIELDPAN            nothing but the base
@@ -117,8 +186,16 @@ WHAT LINKS AGAINST WHAT
     Nothing needs VGAGFX.CPP.  It is an option, not a layer.
 
 
-THREE RULES THAT ARE NOT OBVIOUS
---------------------------------
+FOUR RULES THAT ARE NOT OBVIOUS
+-------------------------------
+
+    AN ARROW KEY IS TWO BYTES, AND THE SECOND MAY NOT BE THERE.  getch()
+    gives 0 (or E0h) and then a scan code.  Read the second with getch()
+    unasked and the program stops inside it if the first came alone - a
+    keyboard TSR can leave one - and then eats the next key pressed.  Ask
+    kbhit() first.  And DO read it: left in the buffer it comes back as the
+    next key, and a scan code reads as a letter - Ins is 'R', which pressed
+    the Retry button of a dialog that had no idea about arrow keys.
 
     SETTERS CHANGE STATE; DRAW PAINTS.  SetChecked, Select, SetData, Add -
     none of them put anything on the screen.  It is not only tidiness: a
@@ -161,6 +238,22 @@ BUILDING AND CHECKING IT
     proves the objects do - that nothing has quietly picked up a 32-bit-only
     call, and that no widget needs a class its caller's build script does
     not list.  The 16-bit half is the half that catches things.
+
+    It also says what the folder tree found ("folder tree: 23 rows at
+    C:\MISC\DOSFORMS"), which must be the SAME from both builds - run it
+    from a directory that has parents, or the tree has nothing to read.
+
+    THE EMPTY DRIVE needs a real DOS.  An emulator's built-in DOS reports a
+    missing disk as an ordinary error and never raises INT 24h, so CRITERR
+    cannot be tested under it at all.  Boot MS-DOS, leave A: empty, and
+
+        SET DFCRIT=A
+        DFDEMO /T
+
+    opens A: in the tree and answers the box from a script - Retry, then
+    Cancel.  "empty drive: found=1 asks=2" and a run that ENDS is the
+    proof: with DOS's handler still in place it would be waiting at
+    "Abort, Retry, Fail?".  Both builds pass under MS-DOS 5.
 
 
 WHAT IS STILL DRAWN BY HAND, AND WHERE

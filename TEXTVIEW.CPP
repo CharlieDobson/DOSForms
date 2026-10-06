@@ -433,8 +433,13 @@ void TextView::Show( void )
             }
             if ( k == 0 || k == 0xE0 )
             {
-                int ext = getch();
+                int ext;
                 int before = top, beforeL = left;
+
+                /* The second half of an extended key, asked for only if it
+                 * is there - see App::PollEvent. */
+                if ( !kbhit() ) continue;
+                ext = getch();
                 switch ( ext )
                 {
                 case _KB_UP:    top--;              break;

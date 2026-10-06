@@ -3,12 +3,13 @@
  * Target: MSVC 1.52c / Open Watcom 1.9  DOS
  *===========================================================================*/
 #include "dirscan.hpp"
+#include "criterr.hpp"          // DfFindFirst - a search a disk error cannot lie to
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
 #include <direct.h>             // getcwd, chdir
-#include <dos.h>                // _dos_findfirst, _dos_setdrive, union REGS
+#include <dos.h>                // find_t, _dos_setdrive, union REGS
 #ifdef __386__
 #include <i86.h>                // int386 (the IOCTL drive probe)
 #endif
@@ -31,8 +32,11 @@ static int EntryCmp( const void *a, const void *b )
  * Two versions of the same call.  The 32-bit one goes through the extender's
  * int386; the 16-bit one is a plain int86 with the register pair named
  * instead of the extended one.  Everything else about the call is identical,
- * including what the answers mean. */
-static int DriveExists( int drive1 )
+ * including what the answers mean.
+ *
+ * Public, because the drive list is not the only thing that wants to know:
+ * DirTree's top level is the same set of drives, found the same way. */
+int DsDriveExists( int drive1 )
 {
     union REGS r;
 
@@ -110,6 +114,7 @@ DirScan::DirScan()
     drives  = 0;
     filter[0] = '\0';
     dirsOnly = 0;
+    filesOnly = 0;
     ents = (DsEntry *)malloc( (size_t)DS_MAX_ENTRIES * sizeof( DsEntry ) );
 }
 
@@ -131,6 +136,11 @@ void DirScan::SetDirsOnly( int on )
     dirsOnly = on ? 1 : 0;
 }
 
+void DirScan::SetFilesOnly( int on )
+{
+    filesOnly = on ? 1 : 0;
+}
+
 /* Is 'path' the root of a drive - "C:\" and nothing more? */
 static int PathIsRoot( const char *p )
 {
@@ -139,7 +149,6 @@ static int PathIsRoot( const char *p )
 
 int DirScan::Rescan( void )
 {
-    struct find_t f;
     unsigned      d;
 
     count = 0;
@@ -156,7 +165,7 @@ int DirScan::Rescan( void )
         path[0] = '\0';                  /* there is no path above a root */
         for ( d = 1; d <= 26 && count < DS_MAX_ENTRIES; ++d )
         {
-            if ( DriveExists( (int)d ) )
+            if ( DsDriveExists( (int)d ) )
             {
                 char letter = (char)( 'A' + d - 1 );
                 sprintf( ents[count].disp, "[-%c-]", letter );
@@ -173,21 +182,69 @@ int DirScan::Rescan( void )
         return count;
     }
 
-    /* The way up is on every directory INCLUDING a root, where it leads to
-     * the drive list rather than to another directory.  That is the whole
-     * reason drives are no longer repeated in each listing: there is one
-     * place to find them and one move that gets there. */
-    if ( count < DS_MAX_ENTRIES )
+    AddParent();
+    ReadEntries( "*.*" );
+
+    qsort( ents, count, sizeof( DsEntry ), EntryCmp );
+    return count;
+}
+
+/* The same listing of a directory NAMED rather than stood in.  Nothing is
+ * moved: the search is given the full path, so the process's drive and
+ * directory are where they were afterwards.  It is what a dialog with a tree
+ * beside its file list wants - the tree says which folder, and this says
+ * what is in it - and Enter and Up, which work by moving, are not for a
+ * listing made this way. */
+int DirScan::ScanPath( const char *dir )
+{
+    char pattern[DS_PATHLEN + 8];
+    int  len;
+
+    count  = 0;
+    drives = 0;
+    path[0] = '\0';
+    if ( !ents || !dir || !dir[0] ) return 0;
+
+    strncpy( path, dir, sizeof( path ) - 1 );
+    path[sizeof( path ) - 1] = '\0';
+
+    strcpy( pattern, path );
+    len = (int)strlen( pattern );
+    /* The rule every path builder here keeps: never two separators. */
+    if ( len > 0 && pattern[len-1] != '\\' && pattern[len-1] != '/' )
     {
-        strcpy( ents[count].disp, ".." );
-        strcpy( ents[count].name, ".." );
-        ents[count].kind   = DS_PARENT;
-        ents[count].size   = 0;
-        ents[count].date   = 0;
-        ents[count].time   = 0;
-        ents[count].attrib = 0;
-        ++count;
+        pattern[len++] = '\\';
     }
+    strcpy( pattern + len, "*.*" );
+
+    if ( !filesOnly ) AddParent();
+    ReadEntries( pattern );
+
+    qsort( ents, count, sizeof( DsEntry ), EntryCmp );
+    return count;
+}
+
+/* The way up is on every directory INCLUDING a root, where it leads to the
+ * drive list rather than to another directory.  That is the whole reason
+ * drives are no longer repeated in each listing: there is one place to find
+ * them and one move that gets there. */
+void DirScan::AddParent( void )
+{
+    if ( count >= DS_MAX_ENTRIES ) return;
+
+    strcpy( ents[count].disp, ".." );
+    strcpy( ents[count].name, ".." );
+    ents[count].kind   = DS_PARENT;
+    ents[count].size   = 0;
+    ents[count].date   = 0;
+    ents[count].time   = 0;
+    ents[count].attrib = 0;
+    ++count;
+}
+
+void DirScan::ReadEntries( const char *pattern )
+{
+    struct find_t f;
 
     /* EVERYTHING IS ASKED FOR, and the filter decides what is kept - the
      * wildcard goes to Accept rather than to DOS, because a caller's filter
@@ -201,13 +258,14 @@ int DirScan::Rescan( void )
      * mask asked for, so hidden+system files go with it.  _A_SYSTEM stays, so
      * a file marked system and NOT hidden is still listed; that is a real if
      * rare thing, and hiding it was not what was asked for. */
-    if ( _dos_findfirst( "*.*", _A_SUBDIR | _A_SYSTEM | _A_RDONLY, &f ) == 0 )
+    if ( DfFindFirst( pattern, _A_SUBDIR | _A_SYSTEM | _A_RDONLY, &f ) == 0 )
     {
         do
         {
             if ( count >= DS_MAX_ENTRIES ) break;
             if ( f.attrib & _A_SUBDIR )
             {
+                if ( filesOnly ) continue;
                 if ( f.name[0] == '.' ) continue;      /* skip . and ..       */
                 sprintf( ents[count].disp, "[%.13s]", f.name );
                 ents[count].kind = DS_DIR;
@@ -229,11 +287,8 @@ int DirScan::Rescan( void )
             ents[count].time   = f.wr_time;
             ents[count].attrib = f.attrib;
             ++count;
-        } while ( _dos_findnext( &f ) == 0 );
+        } while ( DfFindNext( &f ) == 0 );
     }
-
-    qsort( ents, count, sizeof( DsEntry ), EntryCmp );
-    return count;
 }
 
 int DirScan::ItemCount( void ) const
@@ -354,8 +409,21 @@ int DirScan::Enter( int i )
         break;
     case DS_DRIVE:
         {
-            unsigned n;
+            unsigned n, was = 0;
+            char     probe[DS_PATHLEN];
+
+            _dos_getdrive( &was );
             _dos_setdrive( (unsigned)( toupper( ents[i].name[0] ) - 'A' + 1 ), &n );
+
+            /* A drive with nothing in it can be changed TO, and then every
+             * question asked of the current drive fails - this one, the next
+             * rescan, and COMMAND.COM's when the program ends.  Go back to
+             * the drive we were on and stay in the drive list. */
+            if ( !getcwd( probe, sizeof( probe ) ) )
+            {
+                if ( was ) _dos_setdrive( was, &n );
+                break;
+            }
             drives = 0;          /* into that drive's current directory */
         }
         break;

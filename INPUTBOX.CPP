@@ -18,7 +18,8 @@
 
 InputBox::InputBox( const foreground_color_t foreground, const background_color_t background,
                     const char *titleText, const char *promptText )
-    : Popup( foreground, background, titleText )
+    : Popup( foreground, background, titleText ),
+      field( FG_BLACK, BG_WHITE )
 {
     short cols = DfCols() ? DfCols() : 80;
     int   want, room;
@@ -26,14 +27,11 @@ InputBox::InputBox( const foreground_color_t foreground, const background_color_
     border_style   = BORDER_DOUBLE_LINE;
     drop_shadow    = TRUE;
     text_justification = CENTER;
-    buffer[0] = '\0';
-    len = 0;
-    cur = 0;
-    scroll = 0;
-    maxlen = (int)sizeof( buffer ) - 1;
     prompt[0] = '\0';
     hasSkip = 0;
-    masked  = 0;
+
+    /* The only control in the box: the keyboard is never anywhere else. */
+    field.SetFocus( TRUE );
 
     // Grow the box to fit the prompt, but never past the screen (two columns
     // spare on the right so the drop shadow has somewhere to fall).
@@ -71,27 +69,10 @@ void InputBox::Place( void )
                     (short)( left + boxW - 1 ) );
 }
 
-void InputBox::SetText( const char *initial )
-{
-    if ( !initial ) { buffer[0] = '\0'; len = 0; cur = 0; scroll = 0; return; }
-    strncpy( buffer, initial, maxlen );
-    buffer[maxlen] = '\0';
-    len = (int)strlen( buffer );
-    cur = len;                  // ready to add to it, which is the usual intent
-    scroll = 0;
-}
-
-void InputBox::SetMaxLength( int n )
-{
-    if ( n < 1 ) n = 1;
-    if ( n > (int)sizeof( buffer ) - 1 ) n = (int)sizeof( buffer ) - 1;
-    maxlen = n;
-    if ( len > maxlen ) { len = maxlen; buffer[len] = '\0'; }
-    ClampCursor();
-}
-
-void InputBox::SetSkipButton( void ) { hasSkip = 1; }
-void InputBox::SetMasked( void )     { masked  = 1; }
+void InputBox::SetText( const char *initial ) { field.SetText( initial ); }
+void InputBox::SetMaxLength( int n )          { field.SetMaxLength( n ); }
+void InputBox::SetSkipButton( void )          { hasSkip = 1; }
+void InputBox::SetMasked( void )              { field.SetMasked( TRUE ); }
 
 int InputBox::FieldWidth( void ) const
 {
@@ -100,83 +81,12 @@ int InputBox::FieldWidth( void ) const
     return fw;
 }
 
-/* Keep the cursor inside the text and the text scrolled so the cursor is on
- * screen.  One column of the field is kept free at the right so the cursor
- * standing at the END of the text has a cell of its own to sit in. */
-void InputBox::ClampCursor( void )
+void InputBox::LayOutField( void )
 {
-    int fw = FieldWidth();
-
-    if ( cur < 0 )   cur = 0;
-    if ( cur > len ) cur = len;
-
-    if ( cur < scroll )           scroll = cur;
-    if ( cur > scroll + fw - 2 )  scroll = cur - ( fw - 2 );
-    if ( scroll < 0 )             scroll = 0;
-}
-
-void InputBox::InsertChar( char c )
-{
-    int i;
-
-    if ( len >= maxlen ) return;
-    for ( i = len; i > cur; --i ) buffer[i] = buffer[i-1];
-    buffer[cur] = c;
-    ++len;
-    ++cur;
-    buffer[len] = '\0';
-}
-
-void InputBox::DeleteAt( int index )
-{
-    int i;
-
-    if ( index < 0 || index >= len ) return;
-    for ( i = index; i < len - 1; ++i ) buffer[i] = buffer[i+1];
-    --len;
-    buffer[len] = '\0';
-}
-
-/* Draw the reverse-video input field, scrolled so the cursor stays visible,
- * with the cursor cell drawn in inverse.  Two calls rather than one: the
- * whole field, then the single cell the cursor is on.  A block character
- * would be wrong now that the cursor can stand in the middle of the text -
- * it would hide the character it is on. */
-void InputBox::DrawField( void )
-{
-    int  fldRow = coordinates.row + 4;         // 0-based screen row
-    int  fldCol = coordinates.column + 3;
-    int  fw     = FieldWidth();
-    char out[IB_TEXT_MAX];
-    char cell[2];
-    int  i;
-
-    if ( fw > (int)sizeof( out ) - 1 ) fw = (int)sizeof( out ) - 1;
-
-    MouseHide guard( mouse );                   // cursor off while we paint
-
-    ClampCursor();
-
-    for ( i = 0; i < fw; ++i )
-    {
-        int src = scroll + i;
-        if ( src < len )
-            /* Masked: the shape of the password is still useful feedback -
-             * you can see how many characters went in - but the characters
-             * themselves are not put on a screen somebody may be behind. */
-            out[i] = masked ? (char)250 : buffer[src];
-        else
-            out[i] = ' ';
-    }
-    out[fw] = '\0';
-
-    DfTextOut( (short)( fldRow + 1 ), (short)( fldCol + 1 ),  // 0-based -> 1-based
-               out, FG_BLACK, BG_WHITE );
-
-    cell[0] = ( cur < len ) ? ( masked ? (char)250 : buffer[cur] ) : ' ';
-    cell[1] = '\0';
-    DfTextOut( (short)( fldRow + 1 ), (short)( fldCol + 1 + ( cur - scroll ) ),
-               cell, FG_WHITE, BG_BLACK );
+    field.SetMouse( mouse );
+    field.SetPosition( (short)( coordinates.row + 4 ),
+                       (short)( coordinates.column + 3 ),
+                       (short)FieldWidth() );
 }
 
 /* Position and draw the flat "[ OK ]" / "[ Cancel ]" buttons on ONE row, using
@@ -209,7 +119,9 @@ void InputBox::LayOutButtons( void )
         btnCancel.SetSingleRow( (unsigned short)row, (unsigned short)( oc + 21 ) );
     }
     else
+    {
         btnCancel.SetSingleRow( (unsigned short)row, (unsigned short)( oc + 10 ) );
+    }
 }
 
 void InputBox::DrawButtons( void )
@@ -231,7 +143,8 @@ void InputBox::TestOpen( int *okRow, int *okCol, int *okEndCol,
                    prompt, fg_color, bg_color );
         LayOutButtons();
         DrawButtons();
-        DrawField();
+        LayOutField();
+        field.Draw();
     }
 
     *okRow        = btnOk.coordinates.row;
@@ -268,7 +181,8 @@ int InputBox::ShowEx( void )
 
         LayOutButtons();
         DrawButtons();
-        DrawField();
+        LayOutField();
+        field.Draw();
     }
 
     // Headless harness: it has nobody to type, so it looks and leaves.
@@ -288,37 +202,29 @@ int InputBox::ShowEx( void )
     // Modal loop: type in the field; Enter / click OK accept, Esc / click Cancel.
     for ( ;; )
     {
+        Event ev;
+
         if ( kbhit() )
         {
-            int k = getch();
-            if ( k == 0 || k == 0xE0 )
+            int key = getch();
+
+            if ( key == 0 || key == 0xE0 )
             {
-                int ext = getch();                              // extended keys
-                if ( hasSkip && ext == _KB_F3 ) { result = IB_SKIP; break; }
-                switch ( ext )
-                {
-                case _KB_LEFT:  if ( cur > 0 )   --cur;      DrawField(); break;
-                case _KB_RIGHT: if ( cur < len ) ++cur;      DrawField(); break;
-                case _KB_HOME:  cur = 0;                     DrawField(); break;
-                case _KB_END:   cur = len;                   DrawField(); break;
-                case _KB_DEL:   DeleteAt( cur );             DrawField(); break;
-                default: break;
-                }
-                continue;
+                /* The second half of an extended key, asked for only if it
+                 * is there - see App::PollEvent. */
+                if ( !kbhit() ) continue;
+                key = 0x100 | ( getch() & 0xFF );
             }
-            if ( k == 13 ) { result = IB_OK;     break; }
-            if ( k == 27 ) { result = IB_CANCEL; break; }
-            if ( k == 8 )
-            {
-                if ( cur > 0 ) { DeleteAt( cur - 1 ); --cur; }
-                DrawField();
-                continue;
-            }
-            if ( k >= 32 && k < 127 )
-            {
-                InsertChar( (char)k );
-                DrawField();
-            }
+
+            if ( hasSkip && key == ( 0x100 | _KB_F3 ) ) { result = IB_SKIP; break; }
+            if ( key == KEY_ENTER ) { result = IB_OK;     break; }
+            if ( key == KEY_ESC )   { result = IB_CANCEL; break; }
+
+            ev.kind    = Event::EV_KEY;
+            ev.key     = key;
+            ev.x = ev.y = 0;
+            ev.buttons = 0;
+            field.HandleEvent( ev );
             continue;
         }
         if ( mouse && mouse->IsInited() )
@@ -334,14 +240,12 @@ int InputBox::ShowEx( void )
 
                 /* A click IN the field puts the cursor where it was clicked,
                  * which is the one mouse gesture a text field owes anyone. */
-                if ( my == coordinates.row + 4 &&
-                     mx >= coordinates.column + 3 &&
-                     mx <  coordinates.column + 3 + FieldWidth() )
-                {
-                    cur = scroll + ( mx - ( coordinates.column + 3 ) );
-                    if ( cur > len ) cur = len;
-                    DrawField();
-                }
+                ev.kind    = Event::EV_MOUSE;
+                ev.key     = 0;
+                ev.x       = mx;
+                ev.y       = my;
+                ev.buttons = b;
+                field.HandleEvent( ev );
             }
             lastB = b;
         }

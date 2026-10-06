@@ -105,20 +105,40 @@ void ListBox::SetSelHighlight( foreground_color_t fg, background_color_t bg )
  * A deep enough row runs out of field, and the indent is clamped rather
  * than allowed to push the marker out of sight: past that depth the tree
  * stops LOOKING deeper, which is better than a row whose name has gone.
+ *
+ * With icons beside the names (see TreeIcons) two more cells follow the
+ * marker - the icon's own and a gap - and the clamp allows for them.
  *---------------------------------------------------------------------------*/
-void ListBox::BuildTreeName( int index, char *dst, int width )
+boolean ListBox::TreeIcons( void ) const
+{
+    return (boolean)( ( row_depth && row_icon && DfHasIcons() ) ? TRUE : FALSE );
+}
+
+/* One place for the indent, because two things need the same answer: the
+ * painting, and the hit test that has to accept the cells that were painted. */
+int ListBox::TreeIndent( int index, int width ) const
+{
+    int depth  = row_depth ? row_depth( user, index ) : 0;
+    int fixed  = TreeIcons() ? 8 : 6;
+    int indent;
+
+    if ( depth < 0 ) depth = 0;
+    indent = depth * 2;
+    if ( indent > width - fixed ) indent = ( width > fixed ) ? width - fixed : 0;
+    return indent;
+}
+
+void ListBox::BuildTreeName( int index, char *dst, int width, int *iconAt )
 {
     char label[80];
-    int  depth = row_depth ? row_depth( user, index ) : 0;
     int  kids  = row_haskids ? row_haskids( user, index ) : 0;
     int  open  = row_expanded ? row_expanded( user, index ) : 0;
     int  n = 0, i, indent;
 
+    if ( iconAt ) *iconAt = -1;
     if ( width < 1 ) { dst[0] = '\0'; return; }
 
-    if ( depth < 0 ) depth = 0;
-    indent = depth * 2;
-    if ( indent > width - 6 ) indent = ( width > 6 ) ? width - 6 : 0;
+    indent = TreeIndent( index, width );
 
     dst[n++] = ' ';                                  /* the mark column */
     for ( i = 0; i < indent && n < width; ++i ) dst[n++] = ' ';
@@ -132,6 +152,13 @@ void ListBox::BuildTreeName( int index, char *dst, int width )
     }
     else
         for ( i = 0; i < 4 && n < width; ++i ) dst[n++] = ' ';
+
+    if ( TreeIcons() && n < width )
+    {
+        if ( iconAt ) *iconAt = n;
+        dst[n++] = ' ';                              /* the icon's cell */
+        if ( n < width ) dst[n++] = ' ';
+    }
 
     label[0] = '\0';
     if ( row_label ) row_label( user, index, label, sizeof( label ) );
@@ -333,6 +360,7 @@ void ListBox::Draw( void )
     /* Icons take over the mark column, but only on a screen that can draw
      * them: in text mode nothing below changes and the '*' glyph stays. */
     boolean useIcons = (boolean)( DfHasIcons() && ( row_icon || mark_icon >= 0 ) );
+    boolean treeIcons = TreeIcons();
 
     if ( hdrRows )
     {
@@ -350,6 +378,7 @@ void ListBox::Draw( void )
         boolean mk = IsMarked( idx );
         foreground_color_t rowFg = hi ? sel_fg : ( mk ? mark_fg : fg_color );
         background_color_t rowBg = hi ? sel_bg : bg_color;
+        int  iconAt = -1;           /* tree rows: where the row's icon goes */
 
         if ( idx < count && row_depth )
         {
@@ -362,7 +391,7 @@ void ListBox::Draw( void )
             int  nw = name_width;
 
             if ( nw > icols ) nw = icols;
-            BuildTreeName( idx, raw, nw );
+            BuildTreeName( idx, raw, nw, &iconAt );
 
             tail[0] = '\0';
             if ( filler ) filler( user, idx, tail, sizeof( tail ) );
@@ -388,7 +417,24 @@ void ListBox::Draw( void )
         /* The icon goes on AFTER the row text, over the cell the text left
          * blank for it, and keeps the row's own background so the highlight
          * bar runs behind it unbroken. */
-        if ( useIcons && icols > 0 && idx < count )
+        if ( useIcons && treeIcons && icols > 0 && idx < count )
+        {
+            /* A tree keeps the two apart: the mark column says whether the
+             * row is marked, and the row's own icon sits with its name. */
+            if ( mk && mark_icon >= 0 )
+            {
+                DfIconOut( screenRow, (short)( left1 + 1 ), mark_icon, rowBg );
+            }
+            if ( iconAt >= 0 && iconAt < icols )
+            {
+                int ic = row_icon( user, idx );
+                if ( ic >= 0 )
+                {
+                    DfIconOut( screenRow, (short)( left1 + 1 + iconAt ), ic, rowBg );
+                }
+            }
+        }
+        else if ( useIcons && icols > 0 && idx < count )
         {
             int ic = mk ? mark_icon
                         : ( row_icon ? row_icon( user, idx ) : DF_ICON_NONE );
@@ -513,15 +559,13 @@ boolean ListBox::HandleEvent( const Event &e )
                 if ( row_depth && idx >= 0 && idx < count &&
                      row_haskids && row_haskids( user, idx ) )
                 {
-                    int d  = row_depth( user, idx );
                     int nw = name_width;
                     int indent, m0;
 
                     if ( nw > InteriorCols() ) nw = InteriorCols();
-                    indent = ( d > 0 ) ? d * 2 : 0;
-                    /* the same clamp BuildTreeName applies, so the cells
-                     * this accepts are the cells that were drawn */
-                    if ( indent > nw - 6 ) indent = ( nw > 6 ) ? nw - 6 : 0;
+                    /* the same indent BuildTreeName used, so the cells this
+                     * accepts are the cells that were drawn */
+                    indent = TreeIndent( idx, nw );
                     m0 = region.column + 2 + indent;
 
                     if ( e.x >= m0 && e.x <= m0 + 2 )

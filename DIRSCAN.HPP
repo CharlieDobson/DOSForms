@@ -38,6 +38,10 @@
 #define DS_DIR    2
 #define DS_FILE   3
 
+/* Is there a drive with this number (1 = A:)?  Asks the device driver, not
+ * the disk, so it does not spin a floppy up.  See DIRSCAN.CPP. */
+int DsDriveExists( int drive1 );
+
 struct DsEntry
 {
     char          disp[16];      /* "[..]", "[-C-]", "[SUB]", "FOO.ZIP"      */
@@ -60,8 +64,11 @@ class DirScan
     int      drives;             /* 1 = showing the drive list, not a dir    */
     char     filter[DS_FILTERLEN];
     int      dirsOnly;
+    int      filesOnly;
 
     int  Accept( const char *name ) const;   /* does the filter want it?     */
+    void AddParent( void );
+    void ReadEntries( const char *pattern );
 
     DirScan( const DirScan & );
     DirScan &operator=( const DirScan & );
@@ -79,6 +86,25 @@ public:
 
     /* List directories only - for choosing a folder rather than a file. */
     void SetDirsOnly( int on );
+
+    /* List files only: no way up and no subdirectories.  For the file pane
+     * of a dialog that has a tree beside it to do the moving about. */
+    void SetFilesOnly( int on );
+
+    /* List a directory given by NAME, without moving to it - the process's
+     * drive and directory are left where they were.  Returns the number of
+     * rows, which with SetFilesOnly may be none.  Enter and Up work by
+     * moving and are not for a listing made this way; FullName is. */
+    int ScanPath( const char *dir );
+
+    /* Leave the drive list for the current directory, without rescanning.
+     * Rescan falls back to the drive list when the directory cannot be read;
+     * a caller about to try again - a disk has been put in - says so with
+     * this first, or the retry would list the drives and read nothing. */
+    void ShowDirectory( void ) { drives = 0; }
+
+    /* No rows at all.  For a pane with nothing to show yet. */
+    void Empty( void ) { count = 0; drives = 0; path[0] = '\0'; }
 
     /* List the current working directory, or the drives when the view is the
      * drive list.  Returns the number of rows, which is never zero: a

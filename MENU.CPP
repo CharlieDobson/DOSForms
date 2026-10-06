@@ -270,6 +270,22 @@ boolean Menu::HandleEvent( const Event &e )
                     }
                 }
             }
+            // Alt+letter is still Alt+letter with the bar focused, and opens
+            // its column as it does from anywhere else.  It used to fall
+            // through to "anything else" below, so Alt+D, Esc, Alt+F left
+            // the bar and opened nothing.
+            if ( e.key >= 0x100 ) {
+                char alt = AltKeyToChar( e.key );
+                if ( alt != 0 ) {
+                    for ( short i = 0; i < column_count; ++i ) {
+                        if ( columns[i].hotkey != '\0'
+                             && (char)toupper( columns[i].hotkey ) == alt ) {
+                            Open( i );
+                            return TRUE;
+                        }
+                    }
+                }
+            }
             // Anything else gives the bar up and is passed on, so a user who
             // pressed Alt by mistake is not trapped in a menu.
             LeaveBar();

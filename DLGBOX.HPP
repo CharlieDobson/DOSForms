@@ -28,9 +28,11 @@
 
 class MSMouse;
 
-/* Long enough for a paragraph with a file name in it, which is what the
- * error messages that reach a dialog are actually made of. */
-#define DLG_MSG_MAX   512
+/* Long enough for a screenful, because a screenful is what the longest
+ * message a dialog can show comes to.  It was 512, which a page of keyboard
+ * help is longer than: the text was cut at the 511th character and the box
+ * was sized, correctly, around what was left. */
+#define DLG_MSG_MAX  1024
 
 /* Four buttons is what a row of them fits on a narrow box, and four is what
  * the question that needed more than three turned out to want: Yes, No, Yes
@@ -59,6 +61,12 @@ public:
 
     char message[DLG_MSG_MAX];
     dialog_buttons_t buttons;
+
+    /* Place the lines as ONE BLOCK: they share a left edge, and
+     * text_justification says where the block goes.  For text with columns
+     * in it - a table of keys - which centring line by line takes apart.
+     * Off by default, so every existing dialog is laid out as it was. */
+    boolean align_block;
 
     // methods
     virtual void Draw( void );

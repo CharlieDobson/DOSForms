@@ -133,7 +133,9 @@ int ProgressBox::PollCancel( void )
     if ( kbhit() )
     {
         int k = getch();
-        if ( k == 0 || k == 0xE0 ) getch();      // extended: drop the pair
+        /* Extended: drop the pair - the second half only if it is there,
+         * because getch() would wait for it (see App::PollEvent). */
+        if ( k == 0 || k == 0xE0 ) { if ( kbhit() ) getch(); }
         else if ( k == _KB_ESC ) return 1;
     }
 

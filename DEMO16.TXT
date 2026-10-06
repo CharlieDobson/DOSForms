@@ -1,0 +1,6 @@
+
+DOSForms widget demo
+modals painted: 11 of 11
+folder tree: 2 rows at C:\, 2 with it open
+DOSForms demo done.
+rc16=

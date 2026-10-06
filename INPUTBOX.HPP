@@ -14,6 +14,10 @@
  * path and retyping the path, and the widget it replaced could only do the
  * second.
  *
+ * THE FIELD IS A TextField.  It was this class's own code until the toolkit
+ * had a second dialog with a field in it; now there is one field, in
+ * TEXTFLD.CPP, and a build that includes INPUTBOX.CPP needs that as well.
+ *
  * The box sizes itself to its prompt rather than the other way round: the
  * width starts at IB_W_MIN, grows to hold a longer prompt, and stops at the
  * screen.  Whatever is left over is CUT, so a prompt built around a file
@@ -24,35 +28,28 @@
 
 #include "popup.hpp"
 #include "button.hpp"
+#include "textfld.hpp"
 #include "structs.hpp"
 
-#define IB_TEXT_MAX  256        /* buffer, including the NUL               */
-#define IB_W_MIN      62        /* narrowest box we will build             */
+#define IB_TEXT_MAX  TF_TEXT_MAX    /* buffer, including the NUL           */
+#define IB_W_MIN      62            /* narrowest box we will build         */
 
 class InputBox : public Popup
 {
     char prompt[128];       // already clipped to what boxW can show
-    char buffer[IB_TEXT_MAX];
-    int  len;               // characters in buffer
-    int  cur;               // cursor: 0..len (len = past the last character)
-    int  scroll;            // first character shown in the field
-    int  maxlen;
+    TextField field;
     int  boxW;              // decided in the constructor, from the prompt
 
     Button btnOk;           // flat single-row "[ OK ]"     (see LayOutButtons)
     Button btnCancel;       // flat single-row "[ Cancel ]"
     Button btnSkip;         // optional third button, off unless SetSkipButton
     int    hasSkip;
-    int    masked;          // 1 = draw dots instead of the typed characters
 
     int  FieldWidth( void ) const;
-    void ClampCursor( void );      // keep 'cur' in range and in view
-    void DrawField( void );
+    void LayOutField( void );
     void LayOutButtons( void );
     void DrawButtons( void );
     void Place( void );     // centre the box for the current screen size
-    void InsertChar( char c );
-    void DeleteAt( int index );
 
     InputBox( const InputBox & );
     InputBox &operator=( const InputBox & );
@@ -62,7 +59,7 @@ public:
               const char *titleText, const char *promptText );
 
     void SetText( const char *initial );
-    const char *Text( void ) const { return buffer; }
+    const char *Text( void ) const { return field.Text(); }
 
     /* Cap what may be typed.  Clamped to the buffer, so a caller may ask for
      * a DOS path's 79 characters without knowing how big the buffer is. */

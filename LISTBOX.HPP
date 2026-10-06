@@ -120,7 +120,11 @@ class ListBox : public DOSForms
     int  InteriorCols( void ) const;
     void ClampView( void );
     void FreeMarks( void );
-    void BuildTreeName( int index, char *dst, int width );  // tree mode only
+    // tree mode only; 'iconAt' receives the cell kept for the row's icon,
+    // counted from the mark column, or -1 when there is none
+    void BuildTreeName( int index, char *dst, int width, int *iconAt );
+    int  TreeIndent( int index, int width ) const;
+    boolean TreeIcons( void ) const;   // icons beside the name, not in col 0
     void NotifyMarks( void );          // redraw + fire on_marks
 
     ListBox( const ListBox & );
@@ -146,7 +150,13 @@ public:
     void SetMarkable( RowMarkable m );
     /* Per-row icons for the mark column, on a screen that can draw them.
      * Costs no columns: the icon goes in the one cell the row text already
-     * has to leave blank for the mark glyph. */
+     * has to leave blank for the mark glyph.
+     *
+     * IN A TREE THE ICON GOES WITH THE NAME instead - after the [+] marker,
+     * indented as far as the row is - because an icon left behind in the
+     * margin says nothing about which level it belongs to.  That does cost
+     * two columns of the name field, and only on a screen that draws icons;
+     * the mark column is left to the mark icon alone. */
     void SetIconProvider( RowIcon fn );
     /* The icon a MARKED row shows in place of its type icon - a tick, by
      * convention.  Replacing the icon rather than sitting next to it is what
